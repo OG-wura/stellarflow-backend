@@ -10,12 +10,18 @@ import {
   logLoginFailed,
   logLogout,
 } from "../services/userAuditService.js";
+import {
+  bruteForceGuard,
+  recordFailedAttempt,
+  clearBruteForceRecord,
+} from "../middleware/bruteForceMiddleware.js";
 import express from "express";
 
 const router = express.Router();
 
 router.post(
   "/login",
+  bruteForceGuard,
   async (
     req: express.Request,
     res: express.Response,
@@ -38,10 +44,13 @@ router.post(
         where: { email },
       });
 
+      const clientIp = req.ip || "unknown";
+
       if (!relayer || !relayer.passwordHash) {
+        recordFailedAttempt(clientIp);
         await logLoginFailed(
           email,
-          req.ip || "unknown",
+          clientIp,
           req.headers["user-agent"] || "unknown",
           "User not found or no password set",
         );
@@ -56,9 +65,10 @@ router.post(
       }
 
       if (!relayer.isActive) {
+        recordFailedAttempt(clientIp);
         await logLoginFailed(
           email,
-          req.ip || "unknown",
+          clientIp,
           req.headers["user-agent"] || "unknown",
           "Account deactivated",
         );
@@ -75,9 +85,10 @@ router.post(
       const isValid = await verifyPassword(password, relayer.passwordHash);
 
       if (!isValid) {
+        recordFailedAttempt(clientIp);
         await logLoginFailed(
           email,
-          req.ip || "unknown",
+          clientIp,
           req.headers["user-agent"] || "unknown",
           "Invalid password",
         );
@@ -91,6 +102,9 @@ router.post(
         return;
       }
 
+      // Successful auth — clear any brute-force counters for this IP
+      clearBruteForceRecord(clientIp);
+
       const token = generateToken({
         userId: relayer.id,
         email: relayer.email!,
@@ -100,7 +114,7 @@ router.post(
       await createUserSession(
         relayer.id,
         token,
-        req.ip || "unknown",
+        clientIp,
         req.headers["user-agent"] || "unknown",
       );
 
@@ -111,7 +125,7 @@ router.post(
 
       await logLoginSuccess(
         relayer.id,
-        req.ip || "unknown",
+        clientIp,
         req.headers["user-agent"] || "unknown",
       );
 
