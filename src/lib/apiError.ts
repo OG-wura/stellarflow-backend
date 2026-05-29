@@ -11,9 +11,11 @@ export const WIKI_BASE_URL = (
 
 export interface ApiErrorPayload {
   success: false;
-  error: string;
-  errorCode: string;
-  helpLink: string;
+  error: {
+    code: string;
+    message: string;
+    timestamp: string;
+  };
 }
 
 /** Default human-readable messages for stable error codes. */
@@ -73,9 +75,11 @@ export function apiErrorPayload(
 
   return {
     success: false,
-    error: resolvedMessage,
-    errorCode,
-    helpLink: buildHelpLink(errorCode),
+    error: {
+      code: errorCode,
+      message: resolvedMessage,
+      timestamp: new Date().toISOString(),
+    },
   };
 }
 
