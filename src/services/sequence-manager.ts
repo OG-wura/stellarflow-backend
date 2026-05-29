@@ -2,59 +2,114 @@ import { Mutex } from "async-mutex";
 import stellarProvider from "../lib/stellarProvider";
 
 /**
- * SequenceManager (Singleton)
- * Synchronizes Stellar sequence numbers to prevent collisions.
- * Uses async-mutex to ensure atomic increments across concurrent requests.
+ * SequenceManager
+ *
+ * Synchronizes Stellar sequence numbers per source account to prevent tx_bad_seq
+ * collisions when multiple backend workers submit transactions concurrently.
  */
 export class SequenceManager {
   private static instance: SequenceManager;
-  private currentSequence: bigint | null = null;
-  private mutex = new Mutex();
+
+  private readonly mutexes = new Map<string, Mutex>();
+  private readonly currentSequences = new Map<string, bigint>();
 
   private constructor() {}
 
-  /**
-   * Get the singleton instance of SequenceManager
-   */
   public static getInstance(): SequenceManager {
     if (!SequenceManager.instance) {
       SequenceManager.instance = new SequenceManager();
     }
+
     return SequenceManager.instance;
   }
 
+  private getMutex(address: string): Mutex {
+    let mutex = this.mutexes.get(address);
+
+    if (!mutex) {
+      mutex = new Mutex();
+      this.mutexes.set(address, mutex);
+    }
+
+    return mutex;
+  }
+
   /**
-   * Fetches the next sequence number for the given address.
-   * If not cached, fetches from Horizon. Otherwise, increments local counter.
-   * @param address - The Stellar public key of the account
-   * @returns The next sequence number as a string
+   * Fetch the true account sequence from Horizon and update the local cache.
+   *
+   * This is used on startup/cache miss and after tx_bad_seq conflicts so the
+   * local queue realigns with the ledger's absolute state.
+   */
+  public async syncSequence(address: string): Promise<string> {
+    const mutex = this.getMutex(address);
+
+    return mutex.runExclusive(async () => {
+      console.info(
+        `[SequenceManager] Syncing sequence from ledger for ${address}...`,
+      );
+
+      const account = await stellarProvider.loadAccount(address);
+      const ledgerSequence = BigInt(account.sequenceNumber());
+
+      this.currentSequences.set(address, ledgerSequence);
+
+      return ledgerSequence.toString();
+    });
+  }
+
+  /**
+   * Return the next sequence number for the given account.
+   *
+   * If the account has no cached sequence, this fetches the current ledger
+   * sequence. Otherwise it increments the local per-account sequence linearly.
    */
   public async getNextSequence(address: string): Promise<string> {
-    return await this.mutex.runExclusive(async () => {
+    const mutex = this.getMutex(address);
+
+    return mutex.runExclusive(async () => {
       try {
-        if (this.currentSequence === null) {
-          console.info(`[SequenceManager] Fetching sequence from Horizon for ${address}...`);
+        const cachedSequence = this.currentSequences.get(address);
+
+        if (cachedSequence === undefined) {
+          console.info(
+            `[SequenceManager] Fetching sequence from Horizon for ${address}...`,
+          );
+
           const account = await stellarProvider.loadAccount(address);
-          this.currentSequence = BigInt(account.sequenceNumber());
-        } else {
-          this.currentSequence += 1n;
+          const ledgerSequence = BigInt(account.sequenceNumber());
+
+          this.currentSequences.set(address, ledgerSequence);
+          return ledgerSequence.toString();
         }
-        return this.currentSequence.toString();
+
+        const nextSequence = cachedSequence + 1n;
+        this.currentSequences.set(address, nextSequence);
+
+        return nextSequence.toString();
       } catch (error) {
-        this.currentSequence = null; // Reset on error to force re-fetch next time
+        this.currentSequences.delete(address);
         throw error;
       }
     });
   }
 
   /**
-   * Invalidate the current sequence to force a re-fetch from the network.
-   * Typically called when a tx_bad_seq error is encountered.
-   * @param _account - The account public key (reserved for multi-account support)
+   * Invalidate the cached sequence for one account, or all accounts if no
+   * account is provided.
    */
-  public invalidate(_account?: string): void {
-    this.currentSequence = null;
-    console.info("[SequenceManager] Sequence invalidated. Next call will fetch from Horizon.");
+  public invalidate(address?: string): void {
+    if (address) {
+      this.currentSequences.delete(address);
+      console.info(
+        `[SequenceManager] Sequence invalidated for ${address}. Next call will sync from Horizon.`,
+      );
+      return;
+    }
+
+    this.currentSequences.clear();
+    console.info(
+      "[SequenceManager] All cached sequences invalidated. Next calls will sync from Horizon.",
+    );
   }
 }
 

@@ -248,7 +248,8 @@ export class StellarService {
           console.warn(
             "⚠️ SequenceManager: stale or invalid local transaction assignment detected. Invalidating sequence and retrying...",
           );
-          sequenceManager.invalidate(await this.getPublicKey());
+          const publicKey = await this.getPublicKey();
+          await sequenceManager.syncSequence(publicKey);
         }
 
         attempt++;
@@ -344,7 +345,8 @@ export class StellarService {
           console.warn(
             "⚠️ SequenceManager: stale or invalid multi-sig assignment detected. Invalidating sequence...",
           );
-          sequenceManager.invalidate(await this.getPublicKey());
+          const publicKey = await this.getPublicKey();
+          await sequenceManager.syncSequence(publicKey);
         }
 
         attempt++;
