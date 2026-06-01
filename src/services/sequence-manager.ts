@@ -48,7 +48,7 @@ export class SequenceManager {
         `[SequenceManager] Syncing sequence from ledger for ${address}...`,
       );
 
-      const account = await stellarProvider.loadAccount(address);
+      const account = await stellarProvider.getServer().loadAccount(address);
       const ledgerSequence = BigInt(account.sequenceNumber());
 
       this.currentSequences.set(address, ledgerSequence);
@@ -75,7 +75,7 @@ export class SequenceManager {
             `[SequenceManager] Fetching sequence from Horizon for ${address}...`,
           );
 
-          const account = await stellarProvider.loadAccount(address);
+          const account = await stellarProvider.getServer().loadAccount(address);
           const ledgerSequence = BigInt(account.sequenceNumber());
 
           this.currentSequences.set(address, ledgerSequence);

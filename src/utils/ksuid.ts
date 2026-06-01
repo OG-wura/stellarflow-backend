@@ -23,7 +23,7 @@ const RANDOM_LEN = 16; // chars for 80-bit random
 
 // Monotonicity guard: if two IDs are generated in the same ms, increment random
 let lastMs = -1;
-let lastRandom = new Uint8Array(10);
+let lastRandom: Uint8Array<any> = new Uint8Array(10);
 
 function encodeTime(ms: number): string {
   let t = ms;

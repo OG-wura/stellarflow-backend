@@ -272,7 +272,7 @@ export class PriceAggregatorService {
 
     if (ticks.length === 0) return null;
 
-    const rates = ticks.map((t) => Number(t.rate));
+    const rates = ticks.map((t: any) => Number(t.rate));
 
     return {
       open: rates[0],

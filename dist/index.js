@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { Horizon } from "@stellar/stellar-sdk";
+import { getStellarNetwork } from "./lib/stellarNetwork";
 import marketRatesRouter from "./routes/marketRates";
 import historyRouter from "./routes/history";
 import priceUpdatesRouter from "./routes/priceUpdates";
@@ -14,6 +15,7 @@ import { initSocket } from "./lib/socket";
 import { SorobanEventListener } from "./services/sorobanEventListener";
 import { multiSigSubmissionService } from "./services/multiSigSubmissionService";
 import { getGasBalanceMonitorService, } from "./services/gasBalanceMonitorService";
+import { sanitizeEnvironmentVariables } from "./config/environment";
 import { validateEnv } from "./utils/envValidator";
 import { enableGlobalLogMasking } from "./utils/logMasker";
 import { hourlyAverageService } from "./services/hourlyAverageService";
@@ -29,6 +31,9 @@ import { priceAggregatorService } from "./services/priceAggregatorService";
 import { contractSanityCheckService } from "./services/contractSanityCheckService";
 // Load environment variables
 dotenv.config();
+// Normalize safe startup environment strings before runtime storage.
+// This helps ensure tokens and asset-like values are canonicalized from mixed case.
+sanitizeEnvironmentVariables();
 // Initialize tracing before other services
 initializeTracing();
 // Setup axios tracing for HTTP requests
@@ -66,7 +71,7 @@ if (!dashboardUrl) {
 }
 const PORT = process.env.PORT || 3000;
 // Horizon server for health checks
-const stellarNetwork = process.env.STELLAR_NETWORK || "TESTNET";
+const stellarNetwork = getStellarNetwork();
 const horizonUrl = stellarNetwork === "PUBLIC"
     ? "https://horizon.stellar.org"
     : "https://horizon-testnet.stellar.org";

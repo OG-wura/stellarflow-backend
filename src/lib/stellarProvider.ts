@@ -1,4 +1,4 @@
-import { Horizon, SorobanRpc } from "@stellar/stellar-sdk";
+import { Horizon, rpc as SorobanRpc } from "@stellar/stellar-sdk";
 import dotenv from "dotenv";
 import { logger } from "../utils/logger";
 import { getStellarNetwork } from "./stellarNetwork";

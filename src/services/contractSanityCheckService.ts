@@ -1,4 +1,5 @@
-import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
+import { rpc as SorobanRpc, xdr } from "@stellar/stellar-sdk";
+import dotenv from "dotenv";
 import { getStellarNetwork } from "../lib/stellarNetwork";
 import stellarProvider from "../lib/stellarProvider";
 import { logger } from "../utils/logger";
@@ -8,9 +9,9 @@ dotenv.config();
 interface ContractSanityCheckResult {
   success: boolean;
   contractId: string;
-  error?: string;
-  version?: string;
-  isActive?: boolean;
+  error?: string | undefined;
+  version?: string | undefined;
+  isActive?: boolean | undefined;
 }
 
 /**
@@ -159,7 +160,7 @@ export class ContractSanityCheckService {
       // Try to get contract ledger data - if it exists, contract is active
       const result = await server.getContractData(
         contractAddress,
-        xdr.ScVal.scvLedgerKeyContractCode(),
+        xdr.ScVal.scvLedgerKeyContractInstance(),
       );
 
       // If we get a response, the contract exists and is active

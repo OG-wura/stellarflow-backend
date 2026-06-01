@@ -29,7 +29,7 @@ export interface AuditContext {
 export async function logUserAccessEvent(ctx: AuditContext): Promise<void> {
   const {
     userId,
-    _actorId,
+    actorId,
     ipAddress,
     userAgent,
     resourceType,

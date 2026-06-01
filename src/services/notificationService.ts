@@ -27,9 +27,9 @@ export interface SystemAlert {
   message: string;
   details?: Record<string, any>;
   timestamp: Date;
-  service?: string;
-  region?: string;
-  correlationId?: string;
+  service?: string | undefined;
+  region?: string | undefined;
+  correlationId?: string | undefined;
 }
 
 export interface NotificationConfig {

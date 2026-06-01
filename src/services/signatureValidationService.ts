@@ -247,7 +247,7 @@ export class SignatureValidationService {
       message: canExecute
         ? "Consensus reached - action can be executed"
         : `Signature added. Need ${updatedConsensus.requiredSignatures - updatedConsensus.collectedSignatures} more signatures`,
-      pendingSignatures: updatedConsensus.pendingSignatures.map((sig) => ({
+      pendingSignatures: updatedConsensus.pendingSignatures.map((sig: any) => ({
         adminPublicKey: sig.adminPublicKey,
         adminName: sig.adminName,
         adminRole: sig.adminRole,
@@ -294,7 +294,7 @@ export class SignatureValidationService {
         valid: false,
         canExecute: false,
         message: "Insufficient valid signatures",
-        pendingSignatures: consensus.pendingSignatures.map((sig) => ({
+        pendingSignatures: consensus.pendingSignatures.map((sig: any) => ({
           adminPublicKey: sig.adminPublicKey,
           adminName: sig.adminName,
           adminRole: sig.adminRole,
@@ -504,16 +504,16 @@ export class SignatureValidationService {
    */
   private async logAuditEvent(event: {
     eventType: string;
-    actionType?: string;
-    relatedId?: number;
+    actionType?: string | undefined;
+    relatedId?: number | undefined;
     actorPublicKey: string;
     actorName: string;
-    actorRole?: string;
-    eventDetails?: string;
-    previousState?: string;
-    newState?: string;
-    ipAddress?: string;
-    userAgent?: string;
+    actorRole?: string | undefined;
+    eventDetails?: string | undefined;
+    previousState?: string | undefined;
+    newState?: string | undefined;
+    ipAddress?: string | undefined;
+    userAgent?: string | undefined;
   }): Promise<void> {
     await prisma.auditLog.create({
       data: {

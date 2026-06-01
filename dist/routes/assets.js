@@ -41,7 +41,7 @@ router.get("/", cacheMiddleware({
     keyGenerator: () => CACHE_KEYS.assets.all(),
 }), async (req, res) => {
     try {
-        const assets = await prisma.currency.findMany({
+        const assets = (await prisma.currency.findMany({
             where: { isActive: true },
             select: {
                 code: true,
@@ -49,7 +49,7 @@ router.get("/", cacheMiddleware({
                 symbol: true,
             },
             orderBy: { code: "asc" },
-        });
+        })) || [];
         res.json({
             success: true,
             assets,

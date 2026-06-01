@@ -15,14 +15,14 @@ const router = Router();
 router.get("/relayers", async (req, res) => {
     try {
         // Get all unique signers/relayers
-        const signers = await prisma.multiSigSignature.groupBy({
+        const signers = (await prisma.multiSigSignature.groupBy({
             by: ["signerPublicKey", "signerName"],
             _count: {
                 id: true,
             },
-        });
+        })) || [];
         // Get all submitted multi-sig prices
-        const submittedPrices = await prisma.multiSigPrice.findMany({
+        const submittedPrices = (await prisma.multiSigPrice.findMany({
             where: {
                 status: "APPROVED",
                 submittedAt: { not: null },
@@ -35,12 +35,12 @@ router.get("/relayers", async (req, res) => {
                     },
                 },
             },
-        });
+        })) || [];
         // Calculate statistics for each relayer
         const relayerStats = await Promise.all(signers.map(async (signer) => {
             const { signerPublicKey, signerName, _count } = signer;
             // Get all signatures by this relayer
-            const signatures = await prisma.multiSigSignature.findMany({
+            const signatures = (await prisma.multiSigSignature.findMany({
                 where: { signerPublicKey },
                 include: {
                     multiSigPrice: {
@@ -54,7 +54,7 @@ router.get("/relayers", async (req, res) => {
                 orderBy: {
                     signedAt: "desc",
                 },
-            });
+            })) || [];
             // Calculate successful pushes (prices that were submitted to Stellar)
             const successfulPushes = signatures.filter((sig) => sig.multiSigPrice.submittedAt !== null).length;
             // Calculate total requests (number of multi-sig prices this relayer was asked to sign)
@@ -150,7 +150,7 @@ router.get("/volume", cacheMiddleware({
             },
         });
         // Get provider requests for the day (from reputation service)
-        const providerStats = await prisma.providerReputation.findMany({
+        const providerStats = (await prisma.providerReputation.findMany({
             select: {
                 providerName: true,
                 totalRequests: true,
@@ -159,13 +159,13 @@ router.get("/volume", cacheMiddleware({
                 lastSuccess: true,
                 lastFailure: true,
             },
-        });
+        })) || [];
         // Calculate total requests (this is cumulative, not daily)
         const totalApiRequests = providerStats.reduce((sum, provider) => sum + provider.totalRequests, 0);
         const totalSuccessfulRequests = providerStats.reduce((sum, provider) => sum + provider.successfulRequests, 0);
         const totalFailedRequests = providerStats.reduce((sum, provider) => sum + provider.failedRequests, 0);
         // Get unique currencies that had activity
-        const activeCurrencies = await prisma.priceHistory.findMany({
+        const activeCurrencies = (await prisma.priceHistory.findMany({
             where: {
                 timestamp: {
                     gte: startOfDay,
@@ -176,9 +176,9 @@ router.get("/volume", cacheMiddleware({
                 currency: true,
             },
             distinct: ["currency"],
-        });
+        })) || [];
         // Get unique data sources for the day
-        const activeSources = await prisma.priceHistory.findMany({
+        const activeSources = (await prisma.priceHistory.findMany({
             where: {
                 timestamp: {
                     gte: startOfDay,
@@ -189,7 +189,7 @@ router.get("/volume", cacheMiddleware({
                 source: true,
             },
             distinct: ["source"],
-        });
+        })) || [];
         const volumeStats = {
             date: targetDate.toISOString().split("T")[0],
             dataPoints: {

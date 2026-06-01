@@ -1,7 +1,7 @@
 import { Transaction, Horizon, Account } from "@stellar/stellar-sdk";
 export declare class StellarService {
     private server;
-    private network;
+    private readonly networkPassphrase;
     private readonly MAX_RETRIES;
     private readonly FEE_INCREMENT_PERCENTAGE;
     private readonly RETRY_DELAY_MS;
