@@ -1,6 +1,32 @@
+from .checked_math import (
+    BoundaryViolationError,
+    CheckedMathError,
+    MathOverflowError,
+    PrecisionLossError,
+    chain_fractional_percentages,
+    checked_div,
+    checked_mul,
+    fractional_metric,
+    multiply_fractional_metrics,
+    percentage,
+    safe_round,
+    validate_metric_value,
+)
 from .ema import RollingEMA, update_ema, ema_sequence, smoothing_factor, progressive_smoothing_factor
 
 __all__ = [
+    "BoundaryViolationError",
+    "CheckedMathError",
+    "MathOverflowError",
+    "PrecisionLossError",
+    "chain_fractional_percentages",
+    "checked_div",
+    "checked_mul",
+    "fractional_metric",
+    "multiply_fractional_metrics",
+    "percentage",
+    "safe_round",
+    "validate_metric_value",
     "RollingEMA",
     "update_ema",
     "ema_sequence",
