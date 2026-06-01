@@ -49,8 +49,10 @@ export const signatureVerificationMiddleware = async (
     return;
   }
 
+  const normalizedSignatureHeader = normalizeHexString(signatureHeader);
+
   // ── 2. Public key availability check ─────────────────────────────────────
-  const publicKeyHex = req.relayer.publicKey;
+  const publicKeyHex = normalizeHexString(String(req.relayer.publicKey || ""));
   if (!publicKeyHex) {
     const msg = `[SignatureVerification] Relayer "${req.relayer.name}" has no registered public key`;
     if (enforced) {
@@ -92,7 +94,7 @@ export const signatureVerificationMiddleware = async (
   // ── 4. Decode signature ───────────────────────────────────────────────────
   let signatureBytes: Uint8Array;
   try {
-    signatureBytes = hexToBytes(signatureHeader);
+    signatureBytes = hexToBytes(normalizedSignatureHeader);
     if (signatureBytes.length !== nacl.sign.signatureLength) {
       throw new Error(
         `Expected ${nacl.sign.signatureLength} bytes, got ${signatureBytes.length}`,
@@ -129,7 +131,11 @@ export const signatureVerificationMiddleware = async (
   const messageBytes = Buffer.from(rawBody, "utf-8");
 
   // ── 6. Verify the Ed25519 signature ──────────────────────────────────────
-  const valid = nacl.sign.detached.verify(messageBytes, signatureBytes, publicKeyBytes);
+  const valid = nacl.sign.detached.verify(
+    messageBytes,
+    signatureBytes,
+    publicKeyBytes,
+  );
 
   if (!valid) {
     console.warn(
@@ -170,14 +176,21 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 /**
- * Retrieve the raw request body as a string.
+ * Normalize an incoming hex string by removing common invisible whitespace.
  *
- * Express parses `req.body` from the raw bytes. We reconstruct the canonical
- * JSON string by re-serialising `req.body` so the signature message is
- * deterministic regardless of whitespace in the original payload.
- *
- * If `req.body` is empty or not an object, returns an empty string.
+ * This protects signature validation from breaking when headers or stored
+ * keys contain line breaks, tabs, zero-width spaces, or other hidden padding.
  */
+export function normalizeHexString(hex: string): string {
+  return hex
+    .replace(/\s+/g, "")
+    .replace(/\u200B/g, "")
+    .replace(/\u200C/g, "")
+    .replace(/\u200D/g, "")
+    .replace(/\uFEFF/g, "")
+    .trim();
+}
+
 function getRawBody(req: Request): string | null {
   try {
     if (req.body === undefined || req.body === null) {

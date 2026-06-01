@@ -298,8 +298,21 @@ export class MarketRateService {
     }
     async getAllRates() {
         const currencies = Array.from(this.fetchers.keys());
-        const promises = currencies.map((currency) => this.getRate(currency));
-        return Promise.all(promises);
+        const settledResults = await Promise.allSettled(currencies.map((currency) => this.getRate(currency)));
+        return settledResults.map((result, index) => {
+            if (result.status === "fulfilled") {
+                return result.value;
+            }
+            const failedCurrency = currencies[index];
+            const errorMessage = result.reason instanceof Error
+                ? result.reason.message
+                : String(result.reason);
+            console.error(`[MarketRateService] Isolated failure for ${failedCurrency}: ${errorMessage}`, result.reason);
+            return {
+                success: false,
+                error: `Failed to fetch ${failedCurrency}: ${errorMessage}`,
+            };
+        });
     }
     async flushBatchSubmissions() {
         this.batchTimeout = null;
