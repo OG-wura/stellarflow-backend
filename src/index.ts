@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { Horizon } from "@stellar/stellar-sdk";
+import { getStellarNetwork } from "./lib/stellarNetwork";
 import marketRatesRouter from "./routes/marketRates";
 import historyRouter from "./routes/history";
 import priceUpdatesRouter from "./routes/priceUpdates";
@@ -89,7 +90,7 @@ if (!dashboardUrl) {
 const PORT = process.env.PORT || 3000;
 
 // Horizon server for health checks
-const stellarNetwork = process.env.STELLAR_NETWORK || "TESTNET";
+const stellarNetwork = getStellarNetwork();
 const horizonUrl =
   stellarNetwork === "PUBLIC"
     ? "https://horizon.stellar.org"

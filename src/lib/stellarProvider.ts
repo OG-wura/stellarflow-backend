@@ -1,6 +1,7 @@
 import { Horizon, SorobanRpc } from "@stellar/stellar-sdk";
 import dotenv from "dotenv";
 import { logger } from "../utils/logger";
+import { getStellarNetwork } from "./stellarNetwork";
 
 dotenv.config();
 
@@ -129,7 +130,7 @@ class StellarProvider {
   private rpcServer: SorobanRpc.Server;
 
   constructor() {
-    this.network = process.env.STELLAR_NETWORK || "TESTNET";
+    this.network = getStellarNetwork();
 
     // Initialize Horizon
     this.urls = buildHorizonUrls(this.network);

@@ -1,4 +1,5 @@
 import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
+import { getStellarNetwork } from "../lib/stellarNetwork";
 import stellarProvider from "../lib/stellarProvider";
 import { logger } from "../utils/logger";
 
@@ -24,7 +25,7 @@ export class ContractSanityCheckService {
 
   constructor() {
     this.CONTRACT_ID = process.env.CONTRACT_ID || "";
-    this.NETWORK = process.env.STELLAR_NETWORK || "TESTNET";
+    this.NETWORK = getStellarNetwork();
   }
 
   /**

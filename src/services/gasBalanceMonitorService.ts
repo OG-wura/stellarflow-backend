@@ -1,6 +1,7 @@
 import { Keypair, Horizon } from "@stellar/stellar-sdk";
 import { promises as fs } from "fs";
 import dotenv from "dotenv";
+import { getStellarNetwork } from "../lib/stellarNetwork";
 import { WebhookService } from "./webhook";
 
 dotenv.config();
@@ -42,7 +43,7 @@ export class GasBalanceMonitorService {
         this.checkIntervalMs = checkIntervalMs;
         this.webhookService = new WebhookService();
 
-        const network = process.env.STELLAR_NETWORK || "TESTNET";
+        const network = getStellarNetwork();
         const horizonUrl =
             network === "PUBLIC"
                 ? "https://horizon.stellar.org"

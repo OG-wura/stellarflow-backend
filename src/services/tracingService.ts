@@ -1,6 +1,7 @@
 import { Request } from 'express';
 import Tracing, { Span, TraceContext } from '../lib/tracing';
 import { createChildSpan } from '../middleware/tracingMiddleware';
+import { getStellarNetwork } from '../lib/stellarNetwork';
 
 /**
  * Service for adding custom tracing to business operations
@@ -53,13 +54,13 @@ export class TracingService {
       'currency': currency,
       'rate': rate,
       'operation.type': 'on_chain_submission',
-      'stellar.network': process.env.STELLAR_NETWORK || 'TESTNET'
+      'stellar.network': getStellarNetwork()
     });
 
     Tracing.getInstance().log(span, 'info', 'Starting on-chain submission', {
       currency,
       rate,
-      network: process.env.STELLAR_NETWORK || 'TESTNET'
+      network: getStellarNetwork()
     });
 
     return span;

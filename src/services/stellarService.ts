@@ -4,13 +4,13 @@ import {
   TransactionBuilder,
   Transaction,
   Operation,
-  Networks,
   Memo,
   Horizon,
   xdr,
   Account,
 } from "@stellar/stellar-sdk";
 import stellarProvider from "../lib/stellarProvider";
+import { getStellarNetworkPassphrase } from "../lib/stellarNetwork";
 import { sequenceManager } from "./sequence-manager";
 import { assertSigningAllowed } from "../state/appState";
 import { signer } from "../signer";
@@ -44,7 +44,7 @@ class LocalTransactionTimeoutError extends Error {
 
 export class StellarService {
   private server: Horizon.Server;
-  private network: string;
+  private readonly networkPassphrase: string;
   private readonly MAX_RETRIES = 3;
   private readonly FEE_INCREMENT_PERCENTAGE = 0.5; // 50% increase each retry
   private readonly RETRY_DELAY_MS = 2000; // 2 seconds delay between retries
@@ -55,7 +55,7 @@ export class StellarService {
   >();
 
   constructor() {
-    this.network = process.env.STELLAR_NETWORK || "TESTNET";
+    this.networkPassphrase = getStellarNetworkPassphrase();
 
     // Use the shared StellarProvider so all services benefit from the same
     // failover state rather than each managing their own Horizon URL.
@@ -94,8 +94,7 @@ export class StellarService {
       (sourceAccount, currentFee) => {
         return new TransactionBuilder(sourceAccount, {
           fee: currentFee.toString(),
-          networkPassphrase:
-            this.network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET,
+          networkPassphrase: this.networkPassphrase,
         })
           .addOperation(
             Operation.manageData({
@@ -133,8 +132,7 @@ export class StellarService {
       (sourceAccount, currentFee) => {
         const builder = new TransactionBuilder(sourceAccount, {
           fee: currentFee.toString(),
-          networkPassphrase:
-            this.network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET,
+          networkPassphrase: this.networkPassphrase,
         });
 
         for (const update of updates) {
@@ -176,8 +174,7 @@ export class StellarService {
       (sourceAccount, currentFee) => {
         return new TransactionBuilder(sourceAccount, {
           fee: currentFee.toString(),
-          networkPassphrase:
-            this.network === "PUBLIC" ? Networks.PUBLIC : Networks.TESTNET,
+          networkPassphrase: this.networkPassphrase,
         })
           .addOperation(
             Operation.manageData({
