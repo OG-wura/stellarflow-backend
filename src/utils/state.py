@@ -1,10 +1,10 @@
 '''state.py
-"""Utility module providing a thread‑safe state register for internal worker flags.
+"""Utility module providing a process‑safe state register for internal worker flags.
 
 The register maintains a mapping from arbitrary string identifiers (e.g. ``asset_pair``
 or ``worker_name``) to boolean flags that indicate whether a particular worker is
-currently active.  All operations are protected by a :class:`threading.Lock`
-ensuring safe concurrent access from multiple ingestion threads.
+currently active.  All operations are protected by a :class:`multiprocessing.Lock`
+ensuring safe concurrent access from multiple ingestion processes.
 
 Typical usage::
 
@@ -25,24 +25,24 @@ libraries so it can be used from both Python and TypeScript runtimes (via
 inter‑process communication) without side effects.
 """
 
-import threading
+import multiprocessing
 from typing import Dict
 
 
 class StateRegister:
-    """Thread‑safe registry for boolean activity flags.
+    """Process‑safe registry for boolean activity flags.
 
     Attributes
     ----------
     _flags: Dict[str, bool]
         Internal mapping from a key to its active/inactive state.
-    _lock: threading.Lock
-        Mutex guarding all modifications and reads of ``_flags``.
+    _lock: multiprocessing.Lock
+        Inter-process mutex guarding all modifications and reads of ``_flags``.
     """
 
     def __init__(self) -> None:
         self._flags: Dict[str, bool] = {}
-        self._lock = threading.Lock()
+        self._lock = multiprocessing.Lock()
 
     def is_active(self, key: str) -> bool:
         """Return ``True`` if the flag for *key* is set, ``False`` otherwise.
