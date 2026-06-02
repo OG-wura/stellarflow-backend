@@ -2,32 +2,42 @@ import prisma from "../lib/prisma";
 import { normalizeDateToUTC } from "../utils/timeUtils";
 import { evaluatePriceMovement, PRICE_REVIEW_WINDOW_MS, } from "./priceProtection";
 import { webhookService } from "./webhook";
+import { parseBatchNumbers } from "../serialization/helpers.js";
 export const REVIEWABLE_CURRENCIES = new Set(["NGN", "KES", "GHS"]);
-function toNumber(value) {
-    if (value === null || value === undefined)
-        return null;
-    if (typeof value === "number") {
-        return Number.isFinite(value) ? value : null;
-    }
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-}
 function mapReviewRow(row) {
+    /**
+     * Optimized numeric field parsing using batch processing.
+     *
+     * Instead of calling toNumber 3 times per row (with repeated type checks),
+     * uses parseBatchNumbers to process all numeric fields in a single pass.
+     * When mapping many rows in a loop (rows.map(mapReviewRow)), this
+     * amortizes function call overhead and eliminates redundant validations.
+     *
+     * @performance
+     * - Old: 3 function calls × N rows = 3N dispatch operations
+     * - New: 1 batch parse × N rows = N dispatch operations
+     * - Type checking happens once per field in loop context
+     */
+    const parsed = parseBatchNumbers(row, [
+        "rate",
+        "baseline_rate",
+        "change_percent",
+    ]);
     return {
         id: row.id,
         currency: row.currency,
-        rate: toNumber(row.rate) ?? 0,
+        rate: parsed.rate ?? 0,
         source: row.source,
         fetchedAt: new Date(row.fetched_at),
         reviewStatus: row.review_status,
         contractStatus: row.contract_status,
         reason: row.review_reason,
         notes: row.review_notes,
-        baselineRate: toNumber(row.baseline_rate),
+        baselineRate: parsed.baseline_rate,
         baselineTimestamp: row.baseline_timestamp
             ? new Date(row.baseline_timestamp)
             : null,
-        changePercent: toNumber(row.change_percent),
+        changePercent: parsed.change_percent,
         memoId: row.memo_id,
         stellarTxHash: row.stellar_tx_hash,
         reviewedAt: row.reviewed_at ? new Date(row.reviewed_at) : null,
