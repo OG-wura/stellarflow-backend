@@ -6,45 +6,24 @@ accidentally leave timeouts uncapped.
 
 Timeout handling contract
 -------------------------
-* ``asyncio.TimeoutError`` / ``aiohttp.ServerTimeoutError`` are caught,
+* ``httpx.TimeoutException`` / ``asyncio.TimeoutError`` are caught,
   logged with endpoint, duration, and UTC timestamp, then re-raised as
   ``FetchTimeoutError`` so callers can distinguish them from other errors.
 * Non-timeout errors (connection refused, DNS failure, HTTP error status)
   propagate unchanged — this module never swallows them.
-* Resources (connections, semaphore slots) are always released in a
-  ``finally`` block so the async slot returns to the pool immediately.
+* Connections are always returned to the pool automatically — httpx manages
+  this transparently via its internal connection pool.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-import aiohttp
+import httpx
 
-
-# ---------------------------------------------------------------------------
-# Socket keepalive configuration
-# ---------------------------------------------------------------------------
-
-# Use low-level OS socket keepalive to detect and tear down dead peer
-# connections aggressively. This protects the client from hung TCP sockets
-# when a remote peer drops the connection without a proper FIN/RST.
-_DEFAULT_SOCKET_OPTIONS = [
-    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-]
-
-if hasattr(socket, "TCP_KEEPIDLE"):
-    _DEFAULT_SOCKET_OPTIONS.extend(
-        [
-            (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 2),
-            (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2),
-            (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-        ]
-    )
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Hard limit for both the TCP connect phase and the full response-read phase.
-#: Expressed in **seconds** as a float because that is what aiohttp expects.
+#: Expressed in **seconds** as a float.
 #: Conceptually: 2500 ms = 2.5 s.
 REQUEST_TIMEOUT_S: float = 2.5
 
@@ -61,15 +40,26 @@ REQUEST_TIMEOUT_S: float = 2.5
 _TIMEOUT_LABEL_MS: int = 2500
 
 # ---------------------------------------------------------------------------
+# Connection limits & HTTP/2
+# ---------------------------------------------------------------------------
+
+#: Reuse up to 10 idle keepalive connections across up to 20 total connections.
+#: HTTP/2 multiplexing allows a single connection to carry many concurrent
+#: streams, reducing socket churn for parallel cross-currency queries.
+_LIMITS = httpx.Limits(
+    max_connections=20,
+    max_keepalive_connections=10,
+)
+
+# ---------------------------------------------------------------------------
 # Sentinel timeout object – built once, reused by every request
 # ---------------------------------------------------------------------------
 
-#: ``aiohttp.ClientTimeout`` with independent connect and sock_read limits.
-#: Using split timeouts (connect vs read) rather than a single ``total`` so
-#: a fast connect to a slow reader is still caught promptly, and vice-versa.
-_TIMEOUT = aiohttp.ClientTimeout(
+_TIMEOUT = httpx.Timeout(
     connect=REQUEST_TIMEOUT_S,
-    sock_read=REQUEST_TIMEOUT_S,
+    read=REQUEST_TIMEOUT_S,
+    write=REQUEST_TIMEOUT_S,
+    pool=REQUEST_TIMEOUT_S,
 )
 
 
@@ -102,39 +92,37 @@ class FetchTimeoutError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def make_session(**kwargs: Any) -> aiohttp.ClientSession:
-    """Create an ``aiohttp.ClientSession`` with the project-wide timeout baked in.
+def make_session(**kwargs: Any) -> httpx.AsyncClient:
+    """Create an ``httpx.AsyncClient`` with HTTP/2 multiplexing enabled and the
+    project-wide timeout baked in.
 
     The caller is responsible for closing the session (use as an async context
-    manager or call ``await session.close()`` explicitly).
+    manager or call ``await session.aclose()`` explicitly).
 
     Parameters
     ----------
     **kwargs:
         Any additional keyword arguments forwarded verbatim to
-        ``aiohttp.ClientSession``. If *timeout* is supplied it will be
+        ``httpx.AsyncClient``. If *timeout* is supplied it will be
         **overridden** by the module-level ``_TIMEOUT`` to prevent accidental
-        uncapping at call sites.
+        uncapping at call sites. Likewise, *limits* is overridden by
+        ``_LIMITS``.
 
     Returns
     -------
-    aiohttp.ClientSession
+    httpx.AsyncClient
         A configured session ready for use.
 
     Notes
     -----
-    Passing ``timeout`` in *kwargs* is silently discarded — the module-level
-    constant is the single source of truth.
+    Passing ``timeout`` or ``limits`` in *kwargs* is silently discarded — the
+    module-level constants are the single source of truth.
     """
-    # Force the module-level timeout regardless of what the caller passes.
     kwargs["timeout"] = _TIMEOUT
+    kwargs["limits"] = _LIMITS
+    kwargs.setdefault("http2", True)
 
-    if "connector" not in kwargs:
-        kwargs["connector"] = aiohttp.TCPConnector(
-            socket_options=_DEFAULT_SOCKET_OPTIONS,
-        )
-
-    return aiohttp.ClientSession(**kwargs)
+    return httpx.AsyncClient(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +131,7 @@ def make_session(**kwargs: Any) -> aiohttp.ClientSession:
 
 
 async def fetch_json(
-    session: aiohttp.ClientSession,
+    session: httpx.AsyncClient,
     url: str,
     *,
     params: Optional[Dict[str, str]] = None,
@@ -153,7 +141,7 @@ async def fetch_json(
     Parameters
     ----------
     session:
-        An ``aiohttp.ClientSession`` — must have been created via
+        An ``httpx.AsyncClient`` — must have been created via
         :func:`make_session` so the project timeout is enforced.
     url:
         Absolute endpoint URL.  **Must not include authentication tokens or
@@ -172,36 +160,32 @@ async def fetch_json(
     FetchTimeoutError
         When the connect or read phase exceeds ``REQUEST_TIMEOUT_S``.
         The exception is logged before being raised.
-    aiohttp.ClientResponseError
+    httpx.HTTPStatusError
         Propagated unchanged for HTTP 4xx / 5xx responses when
         ``raise_for_status`` is called by the caller.
-    aiohttp.ClientError
+    httpx.RequestError
         Propagated unchanged for connection-refused, DNS failure, and any
         other non-timeout transport error.
 
     Notes
     -----
     The session-level timeout (set in :func:`make_session`) is the primary
-    guard.  The ``try/finally`` here ensures the response object is always
-    released even when a timeout fires mid-stream.
+    guard.  httpx manages the response lifecycle transparently so there is no
+    manual release step.
 
     Time : O(1) overhead beyond the network round-trip.
     Space: O(n) for the response body buffer where n is the payload size.
     """
-    resp: Optional[aiohttp.ClientResponse] = None
     try:
         resp = await session.get(url, params=params)
-        return await resp.json()
-    except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+        return resp.json()
+    except httpx.TimeoutException as exc:
         _log_timeout(url)
         raise FetchTimeoutError(url, _TIMEOUT_LABEL_MS) from exc
-    finally:
-        if resp is not None:
-            resp.release()
 
 
 async def fetch_text(
-    session: aiohttp.ClientSession,
+    session: httpx.AsyncClient,
     url: str,
     *,
     params: Optional[Dict[str, str]] = None,
@@ -230,26 +214,22 @@ async def fetch_text(
     ------
     FetchTimeoutError
         On connect or read timeout; logged before being raised.
-    aiohttp.ClientError
+    httpx.RequestError
         Propagated unchanged for all non-timeout transport errors.
 
     Time : O(n) where n = response body length.
     Space: O(n) for the response buffer.
     """
-    resp: Optional[aiohttp.ClientResponse] = None
     try:
         resp = await session.get(url, params=params)
-        return await resp.text()
-    except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+        return resp.text()
+    except httpx.TimeoutException as exc:
         _log_timeout(url)
         raise FetchTimeoutError(url, _TIMEOUT_LABEL_MS) from exc
-    finally:
-        if resp is not None:
-            resp.release()
 
 
 async def post_json(
-    session: aiohttp.ClientSession,
+    session: httpx.AsyncClient,
     url: str,
     payload: Any,
     *,
@@ -279,22 +259,18 @@ async def post_json(
     ------
     FetchTimeoutError
         On connect or read timeout; logged before being raised.
-    aiohttp.ClientError
+    httpx.RequestError
         Propagated unchanged for all non-timeout transport errors.
 
     Time : O(n) where n = max(request body, response body) size.
     Space: O(n) for the request and response buffers.
     """
-    resp: Optional[aiohttp.ClientResponse] = None
     try:
         resp = await session.post(url, json=payload, headers=headers)
-        return await resp.json()
-    except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+        return resp.json()
+    except httpx.TimeoutException as exc:
         _log_timeout(url)
         raise FetchTimeoutError(url, _TIMEOUT_LABEL_MS) from exc
-    finally:
-        if resp is not None:
-            resp.release()
 
 
 # ---------------------------------------------------------------------------
