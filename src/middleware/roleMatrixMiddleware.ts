@@ -3,9 +3,11 @@ import { Role, Permission } from '../types/roles.js';
 
 export interface AuthRequest extends Request {
   user?: {
-    role: Role;
+    userId: number;
+    email: string;
+    role: string;
     group?: string;
-    permissions?: Permission[];
+    permissions?: string[];
   };
 }
 
@@ -44,7 +46,7 @@ export const enforceRoleMatrix = (requiredPermission?: Permission) => {
       req.path.toLowerCase().startsWith(path)
     );
 
-    if (isSensitivePath && user.role === 'OBSERVER') {
+    if (isSensitivePath && user.role === ('OBSERVER' as Role)) {
       return res.status(403).json({
         error: 'Access Denied',
         message: 'Observer keys cannot access administrative or configuration endpoints',
@@ -53,7 +55,7 @@ export const enforceRoleMatrix = (requiredPermission?: Permission) => {
     }
 
     // Permission check
-    const userPermissions = ROLE_MATRIX[user.role] || [];
+    const userPermissions = ROLE_MATRIX[user.role as Role] || [];
 
     if (requiredPermission && 
         !userPermissions.includes(requiredPermission) && 

@@ -31,7 +31,7 @@ export function isValidI128String(value: string): boolean {
   }
 
   try {
-    const num = BigInt(value.split(".")[0]); // Take integer part only
+    const num = BigInt(value.split(".")[0] ?? value); // Take integer part only
     const MAX_I128 = BigInt("170141183460469231731687303715884105727");
     const MIN_I128 = BigInt("-170141183460469231731687303715884105728");
 

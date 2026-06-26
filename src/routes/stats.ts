@@ -151,9 +151,9 @@ router.get(
   cacheMiddleware({
     ttl: CACHE_CONFIG.ttl.stats,
     keyGenerator: (req) => {
-      const dateParam = req.query.date as string;
+      const dateParam = req.query.date as string | undefined;
       const targetDate = dateParam ? new Date(dateParam) : new Date();
-      const dateStr = targetDate.toISOString().split("T")[0];
+      const dateStr = (targetDate.toISOString().split("T")[0]) ?? '';
       return CACHE_KEYS.stats.volume(dateStr);
     },
   }),
