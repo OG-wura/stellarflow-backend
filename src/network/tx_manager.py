@@ -136,12 +136,13 @@ class TxManager:
 
         # Keep assignment, signing, and dispatch together. If signing is slow in
         # one worker, a later sequence cannot leapfrog it on the wire.
-        with state.lock:
-            sequence = state.counter.next(seed_sequence)
-            sequenced_payload = self._with_sequence(payload, sequence)
-            signed_payload = signer(sequenced_payload)
-            self._assert_signed_sequence(signed_payload, sequence)
-            dispatch_result = dispatcher(signed_payload)
+        # Use lock‑free global sequence manager to obtain a unique sequence number.
+        from .sequence_manager import sequence_manager as _global_seq_mgr
+        sequence = _global_seq_mgr.next()
+        sequenced_payload = self._with_sequence(payload, sequence)
+        signed_payload = signer(sequenced_payload)
+        self._assert_signed_sequence(signed_payload, sequence)
+        dispatch_result = dispatcher(signed_payload)
 
         logger.info(
             "[TxManager] Dispatched transaction for %s with sequence %d",
