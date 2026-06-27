@@ -104,7 +104,7 @@ export class MiddleValuePriceService {
     // Use the most recent timestamp from successful responses
     const mostRecentTimestamp = successfulResults.reduce(
       (latest, result) => (result.timestamp > latest ? result.timestamp : latest),
-      successfulResults[0].timestamp,
+      successfulResults[0]!.timestamp,
     );
 
     this.logger.info(`Calculated middle value price for ${currency}`, {
@@ -142,15 +142,12 @@ export class MiddleValuePriceService {
     
     if (sorted.length % 2 === 1) {
       // Odd number: return the middle element
-      return sorted[middle];
+      return sorted[middle]!;
     } else {
       // Even number: return average of two middle elements
-      const mid1 = sorted[middle - 1];
-      const mid2 = sorted[middle];
-      if (mid1 !== undefined && mid2 !== undefined) {
-        return (mid1 + mid2) / 2;
-      }
-      return mid2 ?? mid1 ?? 0;
+      const mid1 = sorted[middle - 1]!;
+      const mid2 = sorted[middle]!;
+      return (mid1 + mid2) / 2;
     }
   }
 

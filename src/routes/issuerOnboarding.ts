@@ -93,7 +93,7 @@ router.post("/:id/decision", async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const updated = await processAdminDecision({ requestId, approve, reviewedBy, reviewNote: reviewNote ?? undefined });
+    const updated = await processAdminDecision({ requestId, approve, reviewedBy, ...(reviewNote !== undefined ? { reviewNote } : {}) });
 
     res.json({
       success: true,

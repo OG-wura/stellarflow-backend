@@ -75,6 +75,11 @@ interface SlackBlock {
     text: string;
     emoji?: boolean;
   }>;
+  elements?: Array<{
+    type: string;
+    text: string;
+    emoji?: boolean;
+  }>;
   accessory?: {
     type: string;
     text: {

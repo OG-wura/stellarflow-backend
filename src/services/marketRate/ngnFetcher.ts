@@ -304,7 +304,6 @@ export class NGNRateFetcher implements MarketRateFetcher {
     if (prices.length === 0) {
       const error = new Error("All NGN rate sources failed");
       this.logger.fetcherError(
-        error,
         "All price sources failed - no rates obtained",
         { attemptedSources: 3, pricesLength: prices.length }
       );
@@ -325,10 +324,10 @@ export class NGNRateFetcher implements MarketRateFetcher {
       const error = new Error(
         `Need at least 3 price sources for median calculation, got ${pricesToUse.length}`,
       );
-      this.logger.fetcherError(error.message, {
-        attemptedSources: 3,
-        pricesLength: pricesToUse.length,
-      });
+      this.logger.fetcherError(
+        `Need at least 3 price sources for median calculation, got ${pricesToUse.length}`,
+        { attemptedSources: 3, pricesLength: pricesToUse.length }
+      );
       throw error;
     }
 
@@ -345,7 +344,7 @@ export class NGNRateFetcher implements MarketRateFetcher {
       currency: "NGN",
       rate: medianRate,
       timestamp: mostRecentTimestamp,
-      source: `Weighted average of ${pricesToUse.length} sources (outliers filtered)`,
+      source: `Median of ${pricesToUse.length} sources`,
       rawResponses,
     };
   }

@@ -3,7 +3,7 @@ import { sendApiError } from "../lib/apiError.js";
 import { logger } from "../utils/logger";
 
 // Regexes to detect SQLi and XSS-like patterns (including common encoded forms)
-const suspiciousPattern = /(<script\b|<\/script>|onerror=|onload=|javascript:)|\b(select|union|insert|update|delete|drop|alter|create|exec)\b|['"`;--]|%27|%3C|%3E|%3B/i;
+const suspiciousPattern = /(<script\b|<\/script>|onerror=|onload=|javascript:)|\b(select|union|insert|update|delete|drop|alter|create|exec)\b|['";`\-]|%27|%3C|%3E|%3B/i;
 const strictParamPattern = /[<>{}"'`;\-]|%27|%3C|%3E|%3B/;
 
 /**

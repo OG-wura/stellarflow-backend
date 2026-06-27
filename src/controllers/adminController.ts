@@ -204,18 +204,20 @@ export const upsertRelayerRegistry = async (req: Request, res: Response) => {
       actorName: adminInfo.name,
       actorRole: adminInfo.role,
       eventDetails: `Relayer registry ${isUpdate ? 'updated' : 'created'} for relayer ID ${relayerId}`,
-      previousState: isUpdate ? JSON.stringify({
-        contactName: existing.contactName,
-        email: existing.email,
-        organizationName: existing.organizationName,
-      }) : undefined,
+      ...(isUpdate ? {
+        previousState: JSON.stringify({
+          contactName: existing.contactName,
+          email: existing.email,
+          organizationName: existing.organizationName,
+        }),
+      } : {}),
       newState: JSON.stringify({
         contactName: registry.contactName,
         email: registry.email,
         organizationName: registry.organizationName,
       }),
-      ipAddress: adminInfo.ipAddress,
-      userAgent: adminInfo.userAgent,
+      ...(adminInfo.ipAddress !== undefined ? { ipAddress: adminInfo.ipAddress } : {}),
+      ...(adminInfo.userAgent !== undefined ? { userAgent: adminInfo.userAgent } : {}),
     });
 
     res.json({
@@ -273,9 +275,8 @@ export const deleteRelayerRegistry = async (req: Request, res: Response) => {
         email: existing.email,
         organizationName: existing.organizationName,
       }),
-      newState: undefined,
-      ipAddress: adminInfo.ipAddress,
-      userAgent: adminInfo.userAgent,
+      ...(adminInfo.ipAddress !== undefined ? { ipAddress: adminInfo.ipAddress } : {}),
+      ...(adminInfo.userAgent !== undefined ? { userAgent: adminInfo.userAgent } : {}),
     });
 
     await prisma.relayerRegistry.delete({

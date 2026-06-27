@@ -275,10 +275,10 @@ export class PriceAggregatorService {
     const rates = ticks.map((t: any) => Number(t.rate));
 
     return {
-      open: rates[0],
+      open: rates[0]!,
       high: Math.max(...rates),
       low: Math.min(...rates),
-      close: rates[rates.length - 1],
+      close: rates[rates.length - 1]!,
       count: rates.length,
     };
   }
