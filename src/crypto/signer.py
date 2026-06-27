@@ -49,7 +49,7 @@ from typing import Optional, Type
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SecureKeyHandle", "SigningError"]
+__all__ = ["SecureKeyHandle", "SecureSessionCredentials", "SigningError"]
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -312,3 +312,104 @@ class SecureKeyHandle:
             return bytes(sk.sign(tx_hash).signature)
         except Exception as exc:
             raise SigningError("Signing failed (PyNaCl path).") from exc
+
+
+class SecureSessionCredentials:
+    """Context manager that holds temporary session credentials for one validation scope.
+
+    The credentials are copied into an internal ``bytearray`` on construction.
+    On ``__exit__`` — normal *or* exceptional — the buffer is zero-wiped
+    **before** any reference is released, ensuring credentials are not left
+    in process memory after the validation block closes.
+
+    A ``__del__`` finaliser acts as a last-resort safety net: if the caller
+    fails to use the ``with`` statement the buffer is still wiped on garbage
+    collection.
+
+    Args:
+        credentials: Raw session credential bytes (e.g. API token, JWT).
+
+    Raises:
+        ValueError:   If *credentials* is empty.
+        SigningError: If :meth:`get` is called outside the ``with`` block.
+
+    Example::
+
+        with SecureSessionCredentials(token_bytes) as creds:
+            api_token = creds.get()
+            # use api_token for validation ...
+        # Buffer zero-wiped here; creds is no longer usable.
+    """
+
+    __slots__ = ("_buf", "_active", "_wiped")
+
+    def __init__(self, credentials: bytes) -> None:
+        if not credentials:
+            raise ValueError("credentials must be non-empty bytes.")
+        self._buf: bytearray = bytearray(credentials)
+        self._active: bool = False
+        self._wiped: bool = False
+
+    # ------------------------------------------------------------------
+    # Context-manager protocol
+    # ------------------------------------------------------------------
+
+    def __enter__(self) -> "SecureSessionCredentials":
+        self._active = True
+        logger.debug("[SecureSessionCredentials] Validation scope opened.")
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> bool:
+        self._active = False
+        self._do_wipe()
+        return False
+
+    def __del__(self) -> None:
+        try:
+            self._do_wipe()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _do_wipe(self) -> None:
+        if self._wiped:
+            return
+        self._wiped = True
+        _zero_wipe(self._buf)
+        logger.debug("[SecureSessionCredentials] Validation scope closed — credentials wiped.")
+
+    # ------------------------------------------------------------------
+    # Accessor
+    # ------------------------------------------------------------------
+
+    def get(self) -> bytes:
+        """Return a ``bytes`` copy of the stored session credentials.
+
+        The returned copy is the caller's responsibility to manage.  The
+        internal buffer is unaffected.
+
+        Returns:
+            A ``bytes`` copy of the credentials stored in the handle.
+
+        Raises:
+            SigningError: If called outside the ``with`` block or after the
+                          buffer has already been wiped.
+        """
+        if not self._active:
+            raise SigningError(
+                "SecureSessionCredentials.get() called outside an active validation scope. "
+                "Use 'with SecureSessionCredentials(...) as creds:' and call get() inside."
+            )
+        if self._wiped:
+            raise SigningError(
+                "SecureSessionCredentials.get() called after credentials have been wiped."
+            )
+        return bytes(self._buf)
