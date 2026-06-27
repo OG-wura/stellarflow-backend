@@ -209,9 +209,15 @@ export const upsertRelayerRegistry = async (req: Request, res: Response) => {
         email: registry.email,
         organizationName: registry.organizationName,
       }),
-      ipAddress: adminInfo.ipAddress ?? undefined,
-      userAgent: adminInfo.userAgent ?? undefined,
     };
+
+    if (adminInfo.ipAddress) {
+      auditPayload.ipAddress = adminInfo.ipAddress;
+    }
+
+    if (adminInfo.userAgent) {
+      auditPayload.userAgent = adminInfo.userAgent;
+    }
 
     if (isUpdate) {
       auditPayload.previousState = JSON.stringify({
@@ -265,7 +271,7 @@ export const deleteRelayerRegistry = async (req: Request, res: Response) => {
 
     // Log audit event before deletion
     const adminInfo = extractAdminInfo(req);
-    await logAuditEvent({
+    const deleteAuditPayload: Parameters<typeof logAuditEvent>[0] = {
       eventType: "RELAYER_REGISTRY_DELETED",
       actionType: "RELAYER_REGISTRY",
       relatedId: existing.id,
@@ -278,9 +284,17 @@ export const deleteRelayerRegistry = async (req: Request, res: Response) => {
         email: existing.email,
         organizationName: existing.organizationName,
       }),
-      ipAddress: adminInfo.ipAddress ?? undefined,
-      userAgent: adminInfo.userAgent ?? undefined,
-    });
+    };
+
+    if (adminInfo.ipAddress) {
+      deleteAuditPayload.ipAddress = adminInfo.ipAddress;
+    }
+
+    if (adminInfo.userAgent) {
+      deleteAuditPayload.userAgent = adminInfo.userAgent;
+    }
+
+    await logAuditEvent(deleteAuditPayload);
 
     await prisma.relayerRegistry.delete({
       where: { relayerId },
