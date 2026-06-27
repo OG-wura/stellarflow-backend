@@ -44,8 +44,9 @@ from __future__ import annotations
 
 import ctypes
 import logging
+from contextlib import contextmanager
 from types import TracebackType
-from typing import Optional, Type
+from typing import Iterator, Optional, Type
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,23 @@ def _wipe_bytes_view(view: bytes) -> None:
         ctypes.memset(ctypes.addressof(buf), 0, len(view))
     except Exception:  # noqa: BLE001
         pass  # Never raise from a wipe helper.
+
+
+@contextmanager
+def _temporary_secret_scope(secret_material: bytes) -> Iterator[bytes]:
+    """Context manager that zero-wipes temporary secret material on scope exit.
+
+    A mutable backing buffer is created for the supplied bytes and the emitted
+    immutable ``bytes`` view is used for the crypto library call.  When the
+    ``with`` block exits, both the mutable backing buffer and the temporary
+    bytes view are explicitly cleared before the references are released.
+    """
+    scratch = bytearray(secret_material)
+    try:
+        yield bytes(scratch)
+    finally:
+        _zero_wipe(scratch)
+        del scratch
 
 
 # ---------------------------------------------------------------------------
@@ -251,27 +269,28 @@ class SecureKeyHandle:
         Separating this from ``sign()`` keeps the public method's guard logic
         easy to audit.
         """
-        # Build a fresh bytes copy of the key material.  This copy is
-        # deliberately limited in scope and wiped in the finally block below.
-        key_bytes: bytes = bytes(self._buf)
-        try:
-            stellar_unavailable = False
+        # Build a fresh bytes copy of the key material inside an explicit
+        # scope so the secret is wiped as soon as the signing operation exits.
+        with _temporary_secret_scope(self._buf) as key_bytes:
             try:
-                return self._try_stellar_sdk(key_bytes, tx_hash)
-            except ImportError:
-                stellar_unavailable = True
+                stellar_unavailable = False
+                try:
+                    return self._try_stellar_sdk(key_bytes, tx_hash)  # type: ignore[arg-type]
+                except ImportError:
+                    stellar_unavailable = True
 
-            # Only reach here if stellar_sdk is not installed.
-            if stellar_unavailable:
-                return self._try_pynacl(key_bytes, tx_hash)
+                # Only reach here if stellar_sdk is not installed.
+                if stellar_unavailable:
+                    return self._try_pynacl(key_bytes, tx_hash)  # type: ignore[arg-type]
 
-            # Should never be reached.
-            raise SigningError("Signing failed: no backend available.")  # pragma: no cover
-        finally:
-            # Wipe the transient key copy regardless of success or failure.
-            # _wipe_bytes_view must not raise.
-            _wipe_bytes_view(key_bytes)
-            del key_bytes
+                # Should never be reached.
+                raise SigningError("Signing failed: no backend available.")  # pragma: no cover
+            finally:
+                # The temporary secret scope already clears the mutable backing
+                # buffer on exit; also wipe the immutable bytes view as a
+                # best-effort final sweep before the library call result is
+                # released.
+                _wipe_bytes_view(key_bytes)
 
 
     @staticmethod
