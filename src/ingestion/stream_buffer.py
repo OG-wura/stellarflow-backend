@@ -1,13 +1,52 @@
-"""stream_buffer.py — zero-copy JSON stream parser using memoryview.
+"""stream_buffer.py — zero-copy JSON stream parser with SIMD acceleration.
 
 Accepts raw network binary blocks and locates newline-delimited JSON frames
 without allocating intermediate string objects, reducing GC pressure during
 high-volume market-volatility spikes.
+
+When ``pysimdjson`` is installed the per-frame decode step is handled by a
+thread-local ``simdjson.Parser`` instance, which exploits SIMD vectorization
+(SSE4.2 / AVX2 / AVX-512) and avoids repeated C++ allocations by reusing the
+same parser object across frames on each OS thread.  If the native extension is
+not available the module falls back transparently to the standard ``json``
+library so the pipeline remains functional in any environment.
 """
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Generator
+
+# ---------------------------------------------------------------------------
+# SIMD-accelerated JSON back-end (optional)
+# ---------------------------------------------------------------------------
+try:
+    import simdjson as _simdjson  # type: ignore[import-untyped]
+
+    # Each thread gets its own Parser so concurrent ingestion workers don't
+    # race on a shared C++ parser state.
+    _local = threading.local()
+
+    def _decode(raw: bytes) -> Any:
+        """Decode *raw* bytes via simdjson, reusing the per-thread Parser."""
+        parser: _simdjson.Parser = getattr(_local, "parser", None)
+        if parser is None:
+            parser = _simdjson.Parser()
+            _local.parser = parser
+        # parse() returns a Mapping-compatible C++ proxy — no full Python dict
+        # is materialised unless the caller explicitly iterates all keys.
+        return parser.parse(raw)
+
+    SIMDJSON_AVAILABLE: bool = True
+
+except ImportError:  # pragma: no cover — covered by fallback-path tests
+    def _decode(raw: bytes) -> Any:  # type: ignore[misc]
+        """Fallback: standard library JSON decode."""
+        return json.loads(raw)
+
+    SIMDJSON_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 
 _NEWLINE = ord("\n")
 
@@ -26,6 +65,9 @@ class StreamBuffer:
         A memoryview over the internal bytearray is used during the scan phase
         to slice frame boundaries without intermediate string copies.  The view
         is released before the buffer is trimmed so the bytearray can resize.
+
+        Each complete frame is decoded by the SIMD-accelerated back-end when
+        ``pysimdjson`` is available, or by ``json.loads`` otherwise.
         """
         self._buf += data  # single extend, no str conversion
 
@@ -44,11 +86,14 @@ class StreamBuffer:
         del self._buf[:consumed]  # keep only the incomplete trailing fragment
 
         for frame in frames:
-            yield json.loads(frame)
+            # _decode() handles both the SIMD and stdlib fallback paths.
+            # Input is already bytes — no str conversion needed, which is a
+            # free performance win over the previous json.loads(str) pattern.
+            yield _decode(frame)
 
     def reset(self) -> None:
         """Discard all buffered data."""
         self._buf.clear()
 
 
-__all__ = ["StreamBuffer"]
+__all__ = ["SIMDJSON_AVAILABLE", "StreamBuffer"]
