@@ -41,6 +41,13 @@ Security design
   discarded immediately after — and that intermediate copy is wiped in a
   ``finally`` block.
 
+* **Session-credential scoped-wipe** via :class:`SecureSessionCredentials.use`
+  applies the same ``finally``-block pattern to ephemeral session credentials
+  (API tokens, JWTs, etc.).  Instead of returning a bare ``bytes`` object that
+  may linger on the heap until garbage collection, callers pass a callback and
+  the temporary ``bytes`` view is zeroed immediately after the callback
+  returns — whether normally or with an exception.
+
 * Error messages deliberately omit key material and internal state.  Only
   control-flow reasons for failure are surfaced.
 
@@ -519,6 +526,11 @@ class SecureSessionCredentials:
             api_token = creds.get()
             # use api_token for validation ...
         # Buffer zero-wiped here; creds is no longer usable.
+
+    Prefer the :meth:`use` method over :meth:`get` when possible — it
+    accepts a callback and wipes the temporary ``bytes`` view in a
+    ``finally`` block, minimising the window during which credential
+    material is recoverable from a heap dump.
     """
 
     __slots__ = ("_buf", "_active", "_wiped")
@@ -567,7 +579,7 @@ class SecureSessionCredentials:
         logger.debug("[SecureSessionCredentials] Validation scope closed — credentials wiped.")
 
     # ------------------------------------------------------------------
-    # Accessor
+    # Accessors
     # ------------------------------------------------------------------
 
     def get(self) -> bytes:
@@ -575,6 +587,13 @@ class SecureSessionCredentials:
 
         The returned copy is the caller's responsibility to manage.  The
         internal buffer is unaffected.
+
+        .. caution::
+
+           The returned ``bytes`` object is **immutable** at the Python
+           level and may linger in heap memory until garbage collection.
+           Prefer :meth:`use` with a callback to ensure the temporary copy
+           is wiped immediately after use.
 
         Returns:
             A ``bytes`` copy of the credentials stored in the handle.
@@ -593,3 +612,47 @@ class SecureSessionCredentials:
                 "SecureSessionCredentials.get() called after credentials have been wiped."
             )
         return bytes(self._buf)
+
+    def use(self, callback):
+        """Pass the session credentials to *callback* and wipe the temporary
+        copy immediately after the callback returns (or raises).
+
+        This is the **preferred** way to consume credentials because the
+        intermediate ``bytes`` view is overwritten in a ``finally`` block,
+        minimising the window during which the credential material is
+        recoverable from a process memory dump.
+
+        Args:
+            callback: A callable ``fn(credentials: bytes) -> T`` that
+                      receives the credential bytes for the duration of
+                      the call.  The return value of *callback* is
+                      forwarded as the return value of :meth:`use`.
+
+        Returns:
+            The return value of *callback*.
+
+        Raises:
+            SigningError: If called outside the ``with`` block or after the
+                          buffer has already been wiped.
+
+        Example::
+
+            with SecureSessionCredentials(token_bytes) as creds:
+                api_token = creds.use(lambda tok: verify(tok))
+            # Temporary bytes copy zero-wiped here; creds is no longer usable.
+        """
+        if not self._active:
+            raise SigningError(
+                "SecureSessionCredentials.use() called outside an active validation scope. "
+                "Use 'with SecureSessionCredentials(...) as creds:' and call use() inside."
+            )
+        if self._wiped:
+            raise SigningError(
+                "SecureSessionCredentials.use() called after credentials have been wiped."
+            )
+        temp: bytes = bytes(self._buf)
+        try:
+            return callback(temp)
+        finally:
+            _wipe_bytes_view(temp)
+            del temp
