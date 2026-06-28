@@ -11,9 +11,11 @@ from ingestion.parser import (
     TelemetrySegment,
     TelemetrySegmentBatch,
     TelemetryTuple,
+    build_segments_from_stream,
     build_telemetry_segments,
     flatten_telemetry_frames,
     iter_flat_ticker_tuples,
+    iter_price_events_from_stream,
 )
 
 __all__ = [
@@ -21,7 +23,9 @@ __all__ = [
     "TelemetrySegment",
     "TelemetrySegmentBatch",
     "TelemetryTuple",
+    "build_segments_from_stream",
     "build_telemetry_segments",
     "flatten_telemetry_frames",
     "iter_flat_ticker_tuples",
+    "iter_price_events_from_stream",
 ]
