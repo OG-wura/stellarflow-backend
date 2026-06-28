@@ -1,11 +1,10 @@
-import { BackpressureManager, PacketPriority } from '../queue/backpressure';
+import { BackpressureManager, PacketPriority } from "../queue/backpressure";
 import { Horizon } from "@stellar/stellar-sdk";
 import type { ServerApi } from "@stellar/stellar-sdk/lib/horizon";
 import prisma from "../lib/prisma";
 import { broadcastToSessions } from "../lib/socket";
 import stellarProvider from "../lib/stellarProvider";
 import dotenv from "dotenv";
-import { signer } from "../signer";
 import { logger } from "../utils/logger";
 import { parseBase64ToPositiveNumber } from "../serialization/helpers.js";
 
@@ -30,9 +29,22 @@ export class SorobanEventListener {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(pollIntervalMs: number = 15000) {
-    this.oraclePublicKey = ""; 
+    const secret =
+      process.env.ORACLE_SECRET_KEY ??
+      process.env.SOROBAN_ADMIN_SECRET ??
+      process.env.STELLAR_SECRET;
+    if (!secret) {
+      throw new Error(
+        "Stellar secret key not found in environment variables. Please set STELLAR_SECRET or SOROBAN_ADMIN_SECRET.",
+      );
+    }
+    this.oraclePublicKey = "";
     this.pollIntervalMs = pollIntervalMs;
     this.server = stellarProvider.getServer();
+  }
+
+  getOraclePublicKey(): string {
+    return this.oraclePublicKey;
   }
 
   async start(): Promise<void> {
@@ -42,9 +54,12 @@ export class SorobanEventListener {
     }
 
     this.isRunning = true;
+    const { signer } = await import("../signer/index.js");
     this.oraclePublicKey = await signer.getPublicKey();
-    
-    logger.info(`[EventListener] Starting listener for account ${this.oraclePublicKey}`);
+
+    logger.info(
+      `[EventListener] Starting listener for account ${this.oraclePublicKey}`,
+    );
 
     const lastRecord = await prisma.onChainPrice.findFirst({
       orderBy: { ledgerSeq: "desc" },
@@ -52,7 +67,9 @@ export class SorobanEventListener {
 
     if (lastRecord) {
       this.lastProcessedLedger = lastRecord.ledgerSeq;
-      logger.info(`[EventListener] Resuming from ledger ${this.lastProcessedLedger}`);
+      logger.info(
+        `[EventListener] Resuming from ledger ${this.lastProcessedLedger}`,
+      );
     }
 
     // Start the background worker to process the backpressure queue
@@ -62,6 +79,24 @@ export class SorobanEventListener {
     await this.pollTransactions();
 
     // Start periodic polling
+    this.startPollingTimer();
+  }
+
+  restart(newIntervalMs: number): void {
+    this.pollIntervalMs = newIntervalMs;
+
+    if (!this.isRunning) {
+      return;
+    }
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+    }
+
+    this.startPollingTimer();
+  }
+
+  private startPollingTimer(): void {
     this.pollTimer = setInterval(() => {
       this.pollTransactions().catch((err) => {
         logger.networkError("[EventListener] Poll error:", { err });
@@ -76,11 +111,11 @@ export class SorobanEventListener {
     logger.info("[Worker] Backpressure consumer loop started.");
     while (this.isRunning) {
       const packet = await this.bpManager.dequeue();
-      
+
       if (packet) {
         try {
           const price = packet.data as ConfirmedPrice;
-          
+
           if (packet.priority === PacketPriority.STANDARD) {
             // Essential data: Save to DB
             await prisma.onChainPrice.create({
@@ -97,13 +132,12 @@ export class SorobanEventListener {
 
           // Broadcast all successful updates (Essential or Metric) to UI
           broadcastToSessions("price_update", price);
-          
         } catch (err) {
           logger.error("[Worker] Failed to process queued price:", err);
         }
       } else {
         // Wait 100ms if queue is empty to prevent CPU spinning
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
   }
@@ -126,16 +160,17 @@ export class SorobanEventListener {
         if (!memoId || !memoId.startsWith("SF-")) continue;
 
         const prices = await this.parseOperations(tx, memoId);
-        
+
         for (const price of prices) {
           // Wrap price in a packet and send to queue
           const packet = {
             priority: PacketPriority.STANDARD, // Using Standard for financial data
             data: price,
-            timestamp: Date.now()
+            timestamp: Date.now(),
           };
 
-          if (this.bpManager.enqueue(packet)) {
+          const accepted = await this.bpManager.enqueue(packet);
+          if (accepted) {
             // Update tracking only if it was accepted by queue
             if (price.ledgerSeq > this.lastProcessedLedger) {
               this.lastProcessedLedger = price.ledgerSeq;
@@ -145,7 +180,8 @@ export class SorobanEventListener {
       }
     } catch (error) {
       stellarProvider.reportFailure(error);
-      if (error instanceof Error && error.message.includes("status code 404")) return;
+      if (error instanceof Error && error.message.includes("status code 404"))
+        return;
       throw error;
     }
   }
@@ -157,7 +193,10 @@ export class SorobanEventListener {
     return null;
   }
 
-  private async parseOperations(tx: ServerApi.TransactionRecord, memoId: string): Promise<ConfirmedPrice[]> {
+  private async parseOperations(
+    tx: ServerApi.TransactionRecord,
+    memoId: string,
+  ): Promise<ConfirmedPrice[]> {
     const confirmedPrices: ConfirmedPrice[] = [];
     try {
       const operations = await tx.operations();
@@ -174,12 +213,18 @@ export class SorobanEventListener {
         if (isNaN(rate)) continue;
 
         confirmedPrices.push({
-          currency, rate, txHash: tx.hash, memoId,
-          ledgerSeq: tx.ledger_attr, confirmedAt: new Date(tx.created_at),
+          currency,
+          rate,
+          txHash: tx.hash,
+          memoId,
+          ledgerSeq: tx.ledger_attr,
+          confirmedAt: new Date(tx.created_at),
         });
       }
     } catch (error) {
-      logger.networkError(`[EventListener] Error parsing tx ${tx.hash}:`, { error });
+      logger.networkError(`[EventListener] Error parsing tx ${tx.hash}:`, {
+        error,
+      });
     }
     return confirmedPrices;
   }
@@ -191,5 +236,15 @@ export class SorobanEventListener {
     logger.info("[EventListener] Stopped");
   }
 
-  isActive(): boolean { return this.isRunning; }
+  restart(pollIntervalMs?: number): void {
+    this.stop();
+    if (pollIntervalMs !== undefined) this.pollIntervalMs = pollIntervalMs;
+    this.start().catch((err) =>
+      logger.error("[EventListener] Restart failed:", err),
+    );
+  }
+
+  isActive(): boolean {
+    return this.isRunning;
+  }
 }
