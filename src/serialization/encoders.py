@@ -28,24 +28,21 @@ Total frame size: 8 + 8 + 8 + 8 + 4 + 2 + 1 + 1 = 40 bytes
 import struct
 from typing import NamedTuple, Sequence
 
-# ---------------------------------------------------------------------------
 # Format string & compile-time size
-# ---------------------------------------------------------------------------
-# '<'  — little-endian, no implicit padding (struct-pack semantics)
-# '8s' — 8-byte fixed-length bytes field for asset identifier
-# 'q'  — signed 64-bit integer: scaled price (10^7 fixed-point)
-# 'Q'  — unsigned 64-bit integer: scaled volume (10^7 fixed-point)
-# 'Q'  — unsigned 64-bit integer: Unix timestamp in milliseconds
-# 'I'  — unsigned 32-bit integer: monotonic sequence counter
-# 'H'  — unsigned 16-bit integer: status flags bitmask
-# 'B'  — unsigned 8-bit integer:  data-feed identifier
-# 'B'  — unsigned 8-bit integer:  reserved (padding to even word boundary)
-_FRAME_FMT: str = "<8sqQQIHBB"
-_FRAME_SIZE: int = struct.calcsize(_FRAME_FMT)  # 40 bytes
+# Using '<' for little-endian standard sizes and no implicit alignment padding.
+# The format '<8sqQQIHBB' defines the 40-byte unaligned layout:
+# - 8s: 8-byte asset identifier
+# - q: 64-bit signed scaled price
+# - Q: 64-bit unsigned scaled volume
+# - Q: 64-bit unsigned timestamp in ms
+# - I: 32-bit unsigned sequence / nonce
+# - H: 16-bit unsigned status flags
+# - B: 8-bit unsigned data-feed source ID
+# - B: 8-bit unsigned reserved byte
+_FRAME_STRUCT: struct.Struct = struct.Struct("<8sqQQIHBB")
+_FRAME_SIZE: int = _FRAME_STRUCT.size  # 40 bytes
 
-# ---------------------------------------------------------------------------
 # Status-flag bitmask constants (uint16)
-# ---------------------------------------------------------------------------
 FLAG_LIVE: int = 0x0001       # feed is live / real-time
 FLAG_STALE: int = 0x0002      # value has not refreshed within threshold
 FLAG_ANOMALY: int = 0x0004    # anomaly-detection alert triggered
@@ -53,9 +50,6 @@ FLAG_SYNTHETIC: int = 0x0008  # value is interpolated / synthetic
 FLAG_HALTED: int = 0x0010     # asset trading halted
 
 
-# ---------------------------------------------------------------------------
-# Typed data container
-# ---------------------------------------------------------------------------
 class TelemetryFrame(NamedTuple):
     """Immutable typed container for a single compacted telemetry record.
 
@@ -83,9 +77,67 @@ class TelemetryFrame(NamedTuple):
     feed_id: int      # uint8  — data-feed source identifier
 
 
-# ---------------------------------------------------------------------------
-# Single-frame codec
-# ---------------------------------------------------------------------------
+class TelemetryEncoder:
+    """
+    High-performance, pre-compiled struct packer for telemetry frames.
+    Implements a strict struct packing module pattern using Python's native struct.Struct.
+    """
+    _STRUCT: struct.Struct = _FRAME_STRUCT
+    FRAME_SIZE: int = _FRAME_SIZE
+
+    @classmethod
+    def pack(cls, frame: TelemetryFrame) -> bytes:
+        """
+        Pack a TelemetryFrame into a highly compacted, unaligned raw binary byte array.
+        """
+        asset_bytes = frame.asset_id[:8].ljust(8, b"\x00")
+        return cls._STRUCT.pack(
+            asset_bytes,
+            frame.price,
+            frame.volume,
+            frame.timestamp,
+            frame.sequence,
+            frame.flags,
+            frame.feed_id,
+            0,
+        )
+
+    @classmethod
+    def unpack(cls, data: bytes) -> TelemetryFrame:
+        """
+        Unpack raw binary bytes back into a TelemetryFrame.
+        """
+        unpacked = cls._STRUCT.unpack(data[:cls.FRAME_SIZE])
+        return TelemetryFrame(
+            asset_id=unpacked[0].rstrip(b"\x00"),
+            price=unpacked[1],
+            volume=unpacked[2],
+            timestamp=unpacked[3],
+            sequence=unpacked[4],
+            flags=unpacked[5],
+            feed_id=unpacked[6],
+        )
+
+    @classmethod
+    def pack_bundle(cls, frames: Sequence[TelemetryFrame]) -> bytes:
+        """
+        Pack a sequence of telemetry frames into a single contiguous byte array.
+        """
+        return b"".join(cls.pack(f) for f in frames)
+
+    @classmethod
+    def unpack_bundle(cls, data: bytes) -> list[TelemetryFrame]:
+        """
+        Unpack a contiguous byte array of packed frames.
+        """
+        size = cls.FRAME_SIZE
+        return [
+            cls.unpack(data[offset : offset + size])
+            for offset in range(0, len(data), size)
+            if len(data) - offset >= size
+        ]
+
+
 def pack_frame(frame: TelemetryFrame) -> bytes:
     """Serialise one :class:`TelemetryFrame` into a compact 40-byte buffer.
 
@@ -101,19 +153,7 @@ def pack_frame(frame: TelemetryFrame) -> bytes:
     Raises:
         struct.error: If any field value is out of range for its C-type.
     """
-    # Guarantee exactly 8 bytes for asset_id: truncate then zero-pad.
-    asset_bytes: bytes = frame.asset_id[:8].ljust(8, b"\x00")
-    return struct.pack(
-        _FRAME_FMT,
-        asset_bytes,
-        frame.price,
-        frame.volume,
-        frame.timestamp,
-        frame.sequence,
-        frame.flags,
-        frame.feed_id,
-        0x00,  # reserved byte — always zero
-    )
+    return TelemetryEncoder.pack(frame)
 
 
 def unpack_frame(data: bytes) -> TelemetryFrame:
@@ -133,23 +173,9 @@ def unpack_frame(data: bytes) -> TelemetryFrame:
     Raises:
         struct.error: If ``data`` is shorter than ``FRAME_SIZE``.
     """
-    asset_id, price, volume, timestamp, sequence, flags, feed_id, _ = struct.unpack(
-        _FRAME_FMT, data[:_FRAME_SIZE]
-    )
-    return TelemetryFrame(
-        asset_id=asset_id.rstrip(b"\x00"),
-        price=price,
-        volume=volume,
-        timestamp=timestamp,
-        sequence=sequence,
-        flags=flags,
-        feed_id=feed_id,
-    )
+    return TelemetryEncoder.unpack(data)
 
 
-# ---------------------------------------------------------------------------
-# Batch codec
-# ---------------------------------------------------------------------------
 def pack_bundle(frames: Sequence[TelemetryFrame]) -> bytes:
     """Pack a batch of telemetry frames into a single contiguous byte array.
 
@@ -162,7 +188,7 @@ def pack_bundle(frames: Sequence[TelemetryFrame]) -> bytes:
     Returns:
         A ``bytes`` object of length ``len(frames) * FRAME_SIZE``.
     """
-    return b"".join(pack_frame(f) for f in frames)
+    return TelemetryEncoder.pack_bundle(frames)
 
 
 def unpack_bundle(data: bytes) -> list[TelemetryFrame]:
@@ -177,11 +203,7 @@ def unpack_bundle(data: bytes) -> list[TelemetryFrame]:
     Returns:
         A list of :class:`TelemetryFrame` objects in original order.
     """
-    return [
-        unpack_frame(data[offset : offset + _FRAME_SIZE])
-        for offset in range(0, len(data), _FRAME_SIZE)
-        if len(data) - offset >= _FRAME_SIZE
-    ]
+    return TelemetryEncoder.unpack_bundle(data)
 
 
 def bundle_frame_count(data: bytes) -> int:
@@ -229,6 +251,7 @@ def decode_asset_id(asset_bytes: bytes) -> str:
 __all__ = [
     # Types
     "TelemetryFrame",
+    "TelemetryEncoder",
     # Flag constants
     "FLAG_LIVE",
     "FLAG_STALE",
