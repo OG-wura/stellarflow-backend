@@ -85,7 +85,7 @@ type PriorityAlertDetails = {
   zScore: number;
   mean: number;
   stdDev: number;
-  timestamp: Date;
+  timestamp: Date | number;
 };
 
 export class WebhookService {
@@ -140,19 +140,13 @@ export class WebhookService {
     await this.postMessage(message);
   }
 
-  async sendPriorityAlert(details: {
-    currency: string;
-    rate: number;
-    zScore: number;
-    mean: number;
-    stdDev: number;
-    timestamp: Date;
-  }): Promise<void> {
-    if (!this.webhookUrl) return;
-    const text = `🚨 *Price Anomaly* — ${details.currency}\nRate: ${details.rate} | Z-Score: ${details.zScore.toFixed(2)}σ | Mean: ${details.mean.toFixed(4)} | StdDev: ${details.stdDev.toFixed(4)}`;
-    await this.postMessage({
-      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-    });
+  async sendPriorityAlert(alertDetails: PriorityAlertDetails): Promise<void> {
+    if (!this.webhookUrl) {
+      return;
+    }
+
+    const message = this.formatPriorityAlert(alertDetails);
+    await this.postMessage(message);
   }
 
   private async postMessage(message: WebhookPayload): Promise<void> {
@@ -556,6 +550,60 @@ ${stdDev}` },
           type: "context",
           elements: [
             { type: "mrkdwn", text: `Detected at ${timestamp.toISOString()}` },
+          ],
+        },
+      ],
+    };
+  }
+
+  private formatPriorityAlert(
+    alertDetails: PriorityAlertDetails,
+  ): WebhookPayload {
+    const { currency, rate, zScore, mean, stdDev, timestamp } = alertDetails;
+    const detectedAt =
+      timestamp instanceof Date ? timestamp : new Date(timestamp);
+
+    if (this.platform === "discord") {
+      return {
+        embeds: [
+          {
+            title: "Priority Price Anomaly Alert",
+            color: 0xff6600,
+            fields: [
+              { name: "Currency", value: currency, inline: true },
+              { name: "Rate", value: rate.toString(), inline: true },
+              { name: "Z-Score", value: zScore.toFixed(2), inline: true },
+              { name: "Mean", value: mean.toFixed(4), inline: true },
+              { name: "Std Dev", value: stdDev.toFixed(4), inline: true },
+              {
+                name: "Time",
+                value: detectedAt.toISOString(),
+                inline: true,
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    return {
+      blocks: [
+        {
+          type: "header",
+          text: { type: "plain_text", text: "Priority Price Anomaly Alert" },
+        },
+        {
+          type: "section",
+          fields: [
+            { type: "mrkdwn", text: `*Currency:*\n${currency}` },
+            { type: "mrkdwn", text: `*Rate:*\n${rate}` },
+            { type: "mrkdwn", text: `*Z-Score:*\n${zScore.toFixed(2)}` },
+            { type: "mrkdwn", text: `*Mean:*\n${mean.toFixed(4)}` },
+            { type: "mrkdwn", text: `*Std Dev:*\n${stdDev.toFixed(4)}` },
+            {
+              type: "mrkdwn",
+              text: `*Time:*\n${detectedAt.toISOString()}`,
+            },
           ],
         },
       ],
