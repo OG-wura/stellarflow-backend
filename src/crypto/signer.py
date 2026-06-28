@@ -521,7 +521,7 @@ class SecureSessionCredentials:
         # Buffer zero-wiped here; creds is no longer usable.
     """
 
-    __slots__ = ("_buf", "_active", "_wiped")
+    __slots__ = ("_buf", "_active", "_wiped", "_locked")
 
     def __init__(self, credentials: bytes) -> None:
         if not credentials:
@@ -529,6 +529,11 @@ class SecureSessionCredentials:
         self._buf: bytearray = bytearray(credentials)
         self._active: bool = False
         self._wiped: bool = False
+        # Pin the credential buffer's pages to physical RAM so the OS cannot
+        # page session tokens / API credentials to disk (swap, hibernate file).
+        # _mlock_buffer emits a one-time warning and returns False if unavailable;
+        # execution continues because the zero-wipe layer still applies.
+        self._locked: bool = _mlock_buffer(self._buf)
 
     # ------------------------------------------------------------------
     # Context-manager protocol
@@ -563,8 +568,17 @@ class SecureSessionCredentials:
         if self._wiped:
             return
         self._wiped = True
+        # Zero key material while pages are still locked (same ordering as
+        # SecureKeyHandle._do_wipe) so the OS cannot evict a dirty page to
+        # disk between the wipe and the unlock.
         _zero_wipe(self._buf)
-        logger.debug("[SecureSessionCredentials] Validation scope closed — credentials wiped.")
+        # Release the page lock only after the buffer contains zeros.
+        if self._locked:
+            _munlock_buffer(self._buf)
+            self._locked = False
+        logger.debug(
+            "[SecureSessionCredentials] Validation scope closed — credentials wiped and pages unlocked."
+        )
 
     # ------------------------------------------------------------------
     # Accessor
