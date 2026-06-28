@@ -115,9 +115,13 @@ export class MiddleValuePriceService {
     const middleValue = this.calculateMiddleValue(rates);
 
     // Use the most recent timestamp from successful responses
+    const firstResult = successfulResults[0];
+    if (!firstResult) {
+      throw new Error("No successful price sources available for middle value calculation");
+    }
+
     const mostRecentTimestamp = successfulResults.reduce(
-      (latest, result) =>
-        result.timestamp > latest ? result.timestamp : latest,
+      (latest, result) => (result.timestamp > latest ? result.timestamp : latest),
       successfulResults[0]!.timestamp,
     );
 
@@ -157,19 +161,13 @@ export class MiddleValuePriceService {
     const middle = Math.floor(sorted.length / 2);
 
     if (sorted.length % 2 === 1) {
-      const middleValue = sorted[middle];
-      if (middleValue === undefined) {
-        throw new Error("Unable to resolve middle value from sorted prices");
-      }
-      return middleValue;
+      // Odd number: return the middle element
+      return sorted[middle]!;
     } else {
       // Even number: return average of two middle elements
-      const mid1 = sorted[middle - 1];
-      const mid2 = sorted[middle];
-      if (mid1 !== undefined && mid2 !== undefined) {
-        return (mid1 + mid2) / 2;
-      }
-      return mid2 ?? mid1 ?? 0;
+      const mid1 = sorted[middle - 1]!;
+      const mid2 = sorted[middle]!;
+      return (mid1 + mid2) / 2;
     }
   }
 

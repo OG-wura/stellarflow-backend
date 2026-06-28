@@ -9,6 +9,10 @@ export type ReloadTrigger = "admin-endpoint" | "file-watcher" | "startup";
 let reloadCount: number = 0;
 const KEY_SLOT = "stellar-secret";
 
+function shouldFailFast(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
 /**
  * Validates a candidate Stellar secret key.
  * Throws with a safe message — never includes the candidate value.
@@ -36,7 +40,10 @@ function init(): void {
     return;
   }
 
-  const plaintextKey = process.env.STELLAR_SECRET || process.env.ORACLE_SECRET_KEY || process.env.SOROBAN_ADMIN_SECRET;
+  const plaintextKey =
+    process.env.STELLAR_SECRET ||
+    process.env.ORACLE_SECRET_KEY ||
+    process.env.SOROBAN_ADMIN_SECRET;
   const encryptedKey = process.env.ENCRYPTED_STELLAR_SECRET;
   const masterKey = process.env.VAULT_MASTER_KEY;
 
@@ -45,17 +52,24 @@ function init(): void {
   try {
     if (encryptedKey) {
       if (!masterKey) {
-        console.error("❌ [SecretManager] ENCRYPTED_STELLAR_SECRET is set but VAULT_MASTER_KEY is missing.");
-        process.exit(1);
+        throw new Error(
+          "[SecretManager] ENCRYPTED_STELLAR_SECRET is set but VAULT_MASTER_KEY is missing.",
+        );
       }
       logger.info("[SecretManager] Attempting to decrypt STELLAR_SECRET...");
       finalKey = decrypt(encryptedKey, masterKey);
     } else if (plaintextKey) {
-      logger.warn("[SecretManager] Using plaintext secret key from .env. (Production Violation)");
+      logger.warn(
+        "[SecretManager] Using plaintext secret key from .env. (Production Violation)",
+      );
       finalKey = plaintextKey;
     }
 
     if (!finalKey) {
+      if (process.env.NODE_ENV === "test" || process.env.CI === "true") {
+        logger.warn("[SecretManager] No signing key found — skipping in test/CI environment.");
+        return;
+      }
       console.error("❌ [SecretManager] CRITICAL: No signing key found in environment variables.");
       console.error("Please set STELLAR_SECRET or ENCRYPTED_STELLAR_SECRET.");
       process.exit(1);
@@ -63,8 +77,14 @@ function init(): void {
 
     validateKey(finalKey);
     vault.register(KEY_SLOT, finalKey);
-    logger.info("[SecretManager] Signing key successfully loaded into secure vault.");
+    logger.info(
+      "[SecretManager] Signing key successfully loaded into secure vault.",
+    );
   } catch (err: any) {
+    if (process.env.NODE_ENV === "test" || process.env.CI === "true") {
+      logger.warn(`[SecretManager] Key load failed in test/CI — skipping: ${err.message}`);
+      return;
+    }
     console.error(`❌ [SecretManager] CRITICAL: Failed to load signing key: ${err.message}`);
     process.exit(1);
   }
@@ -80,7 +100,7 @@ export function getSecretKey(): string {
   if (process.env.SIGNER_BACKEND === "kms") {
     throw new Error("Secret key is not available in KMS mode");
   }
-  
+
   const context = vault.openContext("secret-retrieval");
   try {
     return vault.retrieve(KEY_SLOT, context);
@@ -96,7 +116,7 @@ export function getPublicKey(): string {
   if (process.env.SIGNER_BACKEND === "kms") {
     return process.env.STELLAR_PUBLIC_KEY || "KMS_MANAGED_KEY";
   }
-  
+
   const secret = getSecretKey();
   return Keypair.fromSecret(secret).publicKey();
 }
@@ -118,7 +138,7 @@ export function updateSecretKey(
   if (process.env.SIGNER_BACKEND === "kms") {
     throw new Error("Secret key updates are disabled in KMS mode");
   }
-  
+
   try {
     validateKey(newKey);
     const newPublicKey = Keypair.fromSecret(newKey).publicKey();

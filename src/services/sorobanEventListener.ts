@@ -5,7 +5,6 @@ import prisma from "../lib/prisma";
 import { broadcastToSessions } from "../lib/socket";
 import stellarProvider from "../lib/stellarProvider";
 import dotenv from "dotenv";
-import { signer } from "../signer";
 import { logger } from "../utils/logger";
 import { parseBase64ToPositiveNumber } from "../serialization/helpers.js";
 
@@ -30,9 +29,22 @@ export class SorobanEventListener {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(pollIntervalMs: number = 15000) {
+    const secret =
+      process.env.ORACLE_SECRET_KEY ??
+      process.env.SOROBAN_ADMIN_SECRET ??
+      process.env.STELLAR_SECRET;
+    if (!secret) {
+      throw new Error(
+        "Stellar secret key not found in environment variables. Please set STELLAR_SECRET or SOROBAN_ADMIN_SECRET.",
+      );
+    }
     this.oraclePublicKey = "";
     this.pollIntervalMs = pollIntervalMs;
     this.server = stellarProvider.getServer();
+  }
+
+  getOraclePublicKey(): string {
+    return this.oraclePublicKey;
   }
 
   async start(): Promise<void> {
@@ -42,6 +54,7 @@ export class SorobanEventListener {
     }
 
     this.isRunning = true;
+    const { signer } = await import("../signer/index.js");
     this.oraclePublicKey = await signer.getPublicKey();
 
     logger.info(
@@ -66,6 +79,24 @@ export class SorobanEventListener {
     await this.pollTransactions();
 
     // Start periodic polling
+    this.startPollingTimer();
+  }
+
+  restart(newIntervalMs: number): void {
+    this.pollIntervalMs = newIntervalMs;
+
+    if (!this.isRunning) {
+      return;
+    }
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+    }
+
+    this.startPollingTimer();
+  }
+
+  private startPollingTimer(): void {
     this.pollTimer = setInterval(() => {
       this.pollTransactions().catch((err) => {
         logger.networkError("[EventListener] Poll error:", { err });
@@ -138,7 +169,8 @@ export class SorobanEventListener {
             timestamp: Date.now(),
           };
 
-          if (await this.bpManager.enqueue(packet)) {
+          const accepted = await this.bpManager.enqueue(packet);
+          if (accepted) {
             // Update tracking only if it was accepted by queue
             if (price.ledgerSeq > this.lastProcessedLedger) {
               this.lastProcessedLedger = price.ledgerSeq;
@@ -204,20 +236,11 @@ export class SorobanEventListener {
     logger.info("[EventListener] Stopped");
   }
 
-  restart(newIntervalMs: number): void {
-    if (!this.isRunning) return;
-    if (newIntervalMs === this.pollIntervalMs) return;
-    this.pollIntervalMs = newIntervalMs;
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-    }
-    this.pollTimer = setInterval(() => {
-      this.pollTransactions().catch((err) => {
-        logger.networkError("[EventListener] Poll error:", { err });
-      });
-    }, this.pollIntervalMs);
-    logger.info(
-      `[EventListener] Poll interval updated to ${this.pollIntervalMs}ms`,
+  restart(pollIntervalMs?: number): void {
+    this.stop();
+    if (pollIntervalMs !== undefined) this.pollIntervalMs = pollIntervalMs;
+    this.start().catch((err) =>
+      logger.error("[EventListener] Restart failed:", err),
     );
   }
 

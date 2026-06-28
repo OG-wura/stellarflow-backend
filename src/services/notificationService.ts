@@ -75,6 +75,11 @@ interface SlackBlock {
     text: string;
     emoji?: boolean;
   }>;
+  elements?: Array<{
+    type: string;
+    text: string;
+    emoji?: boolean;
+  }>;
   accessory?: {
     type: string;
     text: {
@@ -270,7 +275,7 @@ export class NotificationService {
     blocks.push({
       type: "context",
       elements: contextFields,
-    } as SlackBlock);
+    });
 
     return {
       username: "StellarFlow Alerts",
