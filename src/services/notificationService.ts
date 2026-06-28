@@ -33,8 +33,8 @@ export interface SystemAlert {
 }
 
 export interface NotificationConfig {
-  discordWebhookUrl?: string;
-  slackWebhookUrl?: string;
+  discordWebhookUrl?: string | undefined;
+  slackWebhookUrl?: string | undefined;
   enabledPlatforms: ("discord" | "slack")[];
   rateLimitMinutes: number;
   retryAttempts: number;

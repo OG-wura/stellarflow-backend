@@ -1,7 +1,7 @@
 import winston from 'winston';
 
 import { HttpLogTransport }
-  from '../transports/httpLogTransport';
+  from '../transport/httpLogTransport';
 
 const transports = [
   new winston.transports.Console(),
@@ -15,7 +15,7 @@ if (
   transports.push(
     new HttpLogTransport({
       level: 'info',
-    }),
+    }) as any,
   );
 }
 

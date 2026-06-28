@@ -78,7 +78,7 @@ router.get("/pending", async (_req: Request, res: Response): Promise<void> => {
 // Admin: approve or reject an application
 router.post("/:id/decision", async (req: Request, res: Response): Promise<void> => {
   try {
-    const requestId = parseInt(req.params.id, 10);
+    const requestId = parseInt(req.params.id as string, 10);
     const { approve, reviewedBy, reviewNote } = req.body as {
       approve?: boolean;
       reviewedBy?: string;
@@ -93,7 +93,7 @@ router.post("/:id/decision", async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const updated = await processAdminDecision({ requestId, approve, reviewedBy, reviewNote });
+    const updated = await processAdminDecision({ requestId, approve, reviewedBy, reviewNote: reviewNote ?? undefined });
 
     res.json({
       success: true,

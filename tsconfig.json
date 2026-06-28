@@ -1,7 +1,6 @@
 {
   // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
-    "ignoreDeprecations": "6.0",
 
     "baseUrl": ".",
     "paths": {
@@ -15,7 +14,7 @@
     "module": "ESNext",
     "target": "ESNext",
     "moduleResolution": "node",
-    "ignoreDeprecations": "6.0",
+    "ignoreDeprecations": "5.0",
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "types": ["node"],

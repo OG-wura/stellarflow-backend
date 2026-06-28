@@ -6,7 +6,7 @@ import {
   PRICE_REVIEW_WINDOW_MS,
 } from "./priceProtection";
 import { webhookService } from "./webhook";
-import { parseBatchNumbers } from "../serialization/helpers.js";
+import { parseBatchNumbers, parseToNumber } from "../serialization/helpers.js";
 
 export const REVIEWABLE_CURRENCIES = new Set(["NGN", "KES", "GHS"]);
 
@@ -383,7 +383,7 @@ SELECT *
       return null;
     }
 
-    const rate = toNumber(row.rate);
+    const rate = parseToNumber(row.rate);
     if (rate === null || rate <= 0) {
       return null;
     }

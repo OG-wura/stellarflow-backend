@@ -3,6 +3,7 @@ import { promises as fs } from "fs";
 import dotenv from "dotenv";
 import { getStellarNetwork } from "../lib/stellarNetwork";
 import { WebhookService } from "./webhook";
+import { getSecretKey } from "./secretManager";
 
 dotenv.config();
 
