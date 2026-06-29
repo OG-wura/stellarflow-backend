@@ -6,9 +6,12 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+import logging
+from multiprocessing import shared_memory
+import struct
 
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger("Utils.SharedMemory")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -356,3 +359,163 @@ __all__ = [
     "DynamicThreadingPool",
     "threading_pool",
 ]
+
+CONTROL_SIZE = 8
+
+class SharedMemoryRingBuffer:
+    def __init__(self, name: str, size: int = 1024, slot_size: int = 128, create: bool = False):
+        """
+        Initializes a lock-free circular ring buffer over shared memory primitives.
+        
+        :param name: Unique globally identifiable shared resource string identifier.
+        :param size: Total maximum item slot capacities bound to the circular matrix.
+        :param slot_size: Static byte footprint allocation size reserved per tracking frame slot.
+        """
+        self.size = size
+        self.slot_size = slot_size
+        self.total_bytes = CONTROL_SIZE + (self.size * self.slot_size)
+        
+        if create:
+            self.shm = shared_memory.SharedMemory(name=name, create=True, size=self.total_bytes)
+            # Initialize control indices (Write=0, Read=0) via struct buffers
+            self.shm.buf[0:CONTROL_SIZE] = struct.pack("!II", 0, 0)
+            logger.info(f"SharedMemory Ring Buffer created cleanly: {name} ({self.total_bytes} bytes allocation)")
+        else:
+            self.shm = shared_memory.SharedMemory(name=name)
+            logger.debug(f"Connected to existing shared memory allocation region: {name}")
+
+        self.buf = self.shm.buf
+
+    def _get_pointers(self) -> tuple[int, int]:
+        """Unpacks and extracts the current (write_ptr, read_ptr) execution boundaries."""
+        return struct.unpack("!II", self.buf[0:CONTROL_SIZE])
+
+    def _set_write_pointer(self, ptr: int) -> None:
+        """Sets the write pointer coordinate inside the control header region."""
+        self.buf[0:4] = struct.pack("!I", ptr)
+
+    def _set_read_pointer(self, ptr: int) -> None:
+        """Sets the read pointer coordinate inside the control header region."""
+        self.buf[4:8] = struct.pack("!I", ptr)
+
+    def enqueue(self, data: bytes) -> bool:
+        """
+        Pushes a raw byte frame into the ring buffer without serialization overhead.
+        Returns True if successful, or False if the buffer space is full.
+        """
+        if len(data) > self.slot_size:
+            raise ValueError(f"Payload footprint ({len(data)}b) exceeds configured slot size bound ({self.slot_size}b)")
+
+        write_ptr, read_ptr = self._get_pointers()
+        
+        # Lock-free Ring-Buffer Wrap Around Bound Checking
+        if (write_ptr + 1) % self.size == read_ptr % self.size:
+            logger.warning("SharedMemory queue overflow: Ring buffer is full. Dropping frame telemetry write.")
+            return False
+
+        # Compute exact memory offset address
+        slot_index = write_ptr % self.size
+        offset = CONTROL_SIZE + (slot_index * self.slot_size)
+        
+        # Zero out the block slot and copy raw un-pickled data bytes directly
+        self.buf[offset:offset + self.slot_size] = b'\x00' * self.slot_size
+        self.buf[offset:offset + len(data)] = data
+
+        # Atomically increment write pointer position to open visibility to consumer loops
+        self._set_write_pointer(write_ptr + 1)
+        return True
+
+    def dequeue(self) -> tuple[bool, bytes]:
+        """
+        Pulls a raw byte frame out of the ring buffer.
+        Returns a tuple of (Success Status, Raw Bytes Payload).
+        """
+        write_ptr, read_ptr = self._get_pointers()
+
+        # Check if the queue is empty
+        if read_ptr == write_ptr:
+            return False, b""
+
+        slot_index = read_ptr % self.size
+        offset = CONTROL_SIZE + (slot_index * self.slot_size)
+
+        # Harvest the raw segment allocation slice block
+        raw_payload = bytes(self.buf[offset:offset + self.slot_size]).rstrip(b'\x00')
+
+        # Increment read tracking pointer coordinates to free up slot availability bounds
+        self._set_read_pointer(read_ptr + 1)
+        return True, raw_payload
+
+    def close(self) -> None:
+        """Closes access handle pipelines pointing down shared mapping zones."""
+        self.shm.close()
+
+    def unlink(self) -> None:
+        """Destroys and garbage collects memory map segments from OS kernels."""
+        try:
+            self.shm.unlink()
+            logger.info("SharedMemory segments unlinked cleanly from system cores.")
+        except FileNotFoundError:
+            pass
+🧪 Multi-Process Integrity Testing
+src/utils/__tests__/test_shared_memory.py
+Python
+import multiprocessing
+import time
+import pytest
+from src.utils.threading_pool import SharedMemoryRingBuffer
+
+SHM_TEST_CHANNEL = "shm_telemetry_test_channel"
+
+def child_producer_worker(shm_name, count, slot_size):
+    """Isolated child process script executing raw fast binary writes."""
+    buffer = SharedMemoryRingBuffer(name=shm_name, size=10, slot_size=slot_size, create=False)
+    for i in range(count):
+        payload = f"FRAME_DATA_METRIC_{i}".encode('utf-8')
+        # Busy-wait loop if enqueue transiently returns full state bounds
+        while not buffer.enqueue(payload):
+            time.sleep(0.001)
+    buffer.close()
+
+def test_shared_memory_zero_copy_pipeline():
+    """
+    Asserts lock-free high-speed interprocess communications pass raw data frames
+    safely across standard process borders without pickling errors.
+    """
+    slot_allocation_bytes = 64
+    total_broadcast_frames = 5
+    
+    # 1. Initialize the master SharedMemory Ring Allocation segment
+    master_buffer = SharedMemoryRingBuffer(
+        name=SHM_TEST_CHANNEL, 
+        size=10, 
+        slot_size=slot_allocation_bytes, 
+        create=True
+    )
+
+    # 2. Boot up an isolated background worker process
+    process = multiprocessing.Process(
+        target=child_producer_worker, 
+        args=(SHM_TEST_CHANNEL, total_broadcast_frames, slot_allocation_bytes)
+    )
+    process.start()
+
+    # 3. Harvest incoming messages from the shared memory block
+    received_payloads = []
+    timeout_cutoff = time.time() + 3.0
+
+    while len(received_payloads) < total_broadcast_frames and time.time() < timeout_cutoff:
+        success, frame_bytes = master_buffer.dequeue()
+        if success:
+            received_payloads.append(frame_bytes.decode('utf-8'))
+        else:
+            time.sleep(0.001)
+
+    # 4. Cleanup and assert state structures
+    process.join(timeout=1.0)
+    master_buffer.close()
+    master_buffer.unlink()
+
+    assert len(received_payloads) == total_broadcast_frames
+    assert received_payloads[0] == "FRAME_DATA_METRIC_0"
+    assert received_payloads[-1] == f"FRAME_DATA_METRIC_{total_broadcast_frames - 1}"

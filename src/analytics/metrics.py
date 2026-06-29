@@ -1,51 +1,67 @@
-from __future__ import annotations
+import logging
 
-from typing import Dict, List
+logger = logging.getLogger("Analytics.MathScaler")
 
-# Telemetry calculation loops for historical node uptime percentages.
-# Raw float outputs are rounded to 2 decimal places to keep log sizes clean.
+# Uniform fixed-point scaling factor (10^7 footprint)
+SCALE = 10_000_000
 
+def to_fixed(value: float) -> int:
+    """Converts a standard float value into a scaled 10^7 fixed-point integer."""
+    return int(round(value * SCALE))
 
-def calculate_uptime_percentage(hits: int, total: int) -> float:
-    """Return node uptime as a clean 2-decimal percentage."""
-    if total == 0:
-        return 0.0
-    return round((hits / total) * 100, 2)
+def from_fixed(value: int) -> float:
+    """Converts a scaled 10^7 fixed-point integer back into a standard float."""
+    return float(value) / SCALE
 
-
-def calculate_window_percentages(
-    windows: Dict[str, Dict[str, int]]
-) -> Dict[str, float]:
-    """Calculate uptime percentages for multiple nodes across variable timeframes.
-
-    Parameters
-    ----------
-    windows:
-        Mapping of node_id -> {"hits": int, "total": int}
-
-    Returns
-    -------
-    Dict[str, float]
-        node_id -> rounded uptime percentage
+def fixed_point_sqrt(x: int) -> int:
     """
-    return {
-        node_id: calculate_uptime_percentage(
-            data.get("hits", 0), data.get("total", 0)
-        )
-        for node_id, data in windows.items()
-    }
+    Computes the square root of a 10^7 scaled fixed-point integer using an
+    integer-only binary search strategy to prevent floating-point drift.
+    
+    Formula: target = sqrt(x * SCALE)
+    """
+    if x < 0:
+        logger.error(f"Mathematical domain error: Attempted sqrt calculation on negative variance: {x}")
+        raise ValueError("Cannot compute the fixed-point square root of a negative value.")
+    if x == 0:
+        return 0
 
+    # Adjust the radicand by the scaling footprint to maintain 10^7 scale in the result
+    target = x * SCALE
+    
+    # Binary search boundaries for integer square root evaluation
+    low = 1
+    high = target
+    ans = 1
 
-def summarise_metrics(records: List[Dict[str, int]]) -> List[float]:
-    """Return a list of rounded uptime percentages from a batch of records."""
-    return [
-        calculate_uptime_percentage(r.get("hits", 0), r.get("total", 0))
-        for r in records
-    ]
+    while low <= high:
+        mid = (low + high) // 2
+        mid_squared = mid * mid
 
+        if mid_squared == target:
+            return mid
+        elif mid_squared < target:
+            low = mid + 1
+            ans = mid  # Keep track of the closest floor integer match
+        else:
+            high = mid - 1
 
-__all__ = [
-    "calculate_uptime_percentage",
-    "calculate_window_percentages",
-    "summarise_metrics",
-]
+    # Rounding step: check if the next consecutive integer is closer to the true value
+    if (ans + 1) * (ans + 1) - target < target - ans * ans:
+        ans += 1
+
+    return ans
+
+def calculate_slippage_variance(current_price: int, expected_price: int) -> int:
+    """
+    Calculates slippage variance tracking metrics using the fixed-point square root.
+    Returns the deviation metric cleanly within the uniform 10^7 boundary.
+    """
+    if expected_price <= 0:
+        raise ValueError("Expected price must be greater than zero for variance analytics.")
+        
+    # Scale difference: delta = ((current - expected) / expected) ^ 2
+    delta = ((current_price - expected_price) * SCALE) // expected_price
+    variance_input = (delta * delta) // SCALE
+    
+    return fixed_point_sqrt(variance_input)

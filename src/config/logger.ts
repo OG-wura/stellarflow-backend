@@ -1,5 +1,28 @@
 import winston from 'winston';
 
+<<<<<<< HEAD
+const {
+  combine,
+  timestamp,
+  errors,
+  json,
+  colorize,
+  printf,
+} = winston.format;
+
+const consoleFormat = printf(
+  ({
+    level,
+    message,
+    timestamp,
+    stack,
+  }) => {
+    return `${timestamp} [${level}]: ${
+      stack || message
+    }`;
+  },
+);
+=======
 import { HttpLogTransport }
   from '../transport/httpLogTransport';
 
@@ -18,17 +41,49 @@ if (
     }) as any,
   );
 }
+>>>>>>> 180fe69792d3498090e107e3cfc89592e9d658ed
 
 export const logger =
   winston.createLogger({
     level: 'info',
 
-    format:
-      winston.format.combine(
-        winston.format.timestamp(),
+    format: combine(
+      timestamp(),
+      errors({ stack: true }),
+      json(),
+    ),
 
-        winston.format.json(),
-      ),
+    defaultMeta: {
+      service: 'backend-api',
+    },
 
-    transports,
+    transports: [
+      // Error Logs
+      new winston.transports.File({
+        filename:
+          'logs/error.log',
+        level: 'error',
+      }),
+
+      // Combined Logs
+      new winston.transports.File({
+        filename:
+          'logs/combined.log',
+      }),
+    ],
   });
+
+if (
+  process.env.NODE_ENV !==
+  'production'
+) {
+  logger.add(
+    new winston.transports.Console({
+      format: combine(
+        colorize(),
+        timestamp(),
+        consoleFormat,
+      ),
+    }),
+  );
+}
