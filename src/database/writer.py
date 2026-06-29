@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Automatic Weekly Table Partitioning Router for Telemetry Logs
-==============================================================
+Database writers for telemetry persistence.
+============================================
 
-Splits incoming telemetry records across weekly tables (e.g.
-``telemetry_2024_W01``, ``telemetry_2024_W02``, …) based on a raw Unix-
-timestamp field in the payload. Partitions are created on-demand so that
-historical ingestion never collides with the active insert path.
+* **RelationalWriter** (Issue #579) – PostgreSQL bulk insert with buffered
+  batching via ``psycopg2.extras.execute_values``.  Rows are flushed when
+  the buffer reaches 50 records or every 1000 ms, whichever comes first.
 
-Design goals
-------------
-* **Non-invasive** – acts as a thin proxy in front of any existing
-  ``src.database.batch_sink.BatchSink`` instance.
-* **Zero-copy insert path** – records are buffered and flushed by the
-  underlying ``BatchSink`` exactly as before; the router only rewrites
-  the per-write target table name.
-* **Auto-schema** – when a new calendar week is encountered the router
-  creates the child table in a short ``CREATE TABLE IF NOT EXISTS`` call.
-  The DDL is executed synchronously on the writer thread but is fast
-  enough to not impact throughput (a few milliseconds at most).
-* **SQLite-first** – same primitive surface as the surrounding modules
-  (``sqlite3``), but written with standard SQL so it can be ported to
-  Postgres with minor tweaks (``GENERATED ALWAYS AS`` partitions instead
-  of manual routing).
+* **PartitionedTelemetryWriter** – weekly SQLite partition router in front
+  of ``BatchSink``.  Splits incoming telemetry records across weekly tables
+  (e.g. ``telemetry_2024_W01``, ``telemetry_2024_W02``, …) based on a raw
+  Unix-timestamp field in the payload.
 
-Usage::
+RelationalWriter usage::
+
+    import psycopg2
+    from src.database.writer import RelationalWriter
+
+    conn = psycopg2.connect(database_url)
+    writer = RelationalWriter(conn, table_name="telemetry")
+    writer.save({"asset_id": "NGN/XLM", "price": 12345, "ts": 1700000000})
+    writer.shutdown()
+
+PartitionedTelemetryWriter usage::
 
     import sqlite3
     from src.database.batch_sink import BatchSink
@@ -34,13 +32,13 @@ Usage::
     base_sink = BatchSink(conn, table_name='telemetry', flush_interval=2.0)
     writer = PartitionedTelemetryWriter(
         base_sink,
-        timestamp_field='ts',   # Unix-epoch seconds or milliseconds field in the payload
+        timestamp_field='ts',
     )
 
     writer.save({
         "asset_id": "xlm-usdc",
         "price": 0.12,
-        "ts": 1700000000,   # → routed to telemetry_2023_W48 or similar
+        "ts": 1700000000,
     })
 """
 
@@ -50,10 +48,156 @@ import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
+
 from .batch_sink import BatchSink
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_BATCH_SIZE = 50
+DEFAULT_FLUSH_INTERVAL_MS = 1000.0
+
+
+def _execute_values_bulk(cursor: Any, sql: str, values: List[tuple], page_size: int) -> None:
+    """Bulk-insert helper; separated for test patching."""
+    try:
+        from psycopg2.extras import execute_values
+    except ImportError as exc:
+        raise RuntimeError(
+            "psycopg2 is required for RelationalWriter bulk inserts"
+        ) from exc
+    execute_values(cursor, sql, values, page_size=page_size)
+
+
+# ---------------------------------------------------------------------------
+# RelationalWriter – PostgreSQL bulk insert (Issue #579)
+# ---------------------------------------------------------------------------
+
+class RelationalWriter:
+    """Thread-safe transactional buffer for batched PostgreSQL inserts.
+
+    Rows are flushed when either:
+
+    * the buffer reaches ``batch_size`` records (default 50), or
+    * the background timer fires every ``flush_interval_ms`` (default 1000 ms).
+    """
+
+    def __init__(
+        self,
+        connection: Any,
+        table_name: str = "telemetry",
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        flush_interval_ms: float = DEFAULT_FLUSH_INTERVAL_MS,
+    ) -> None:
+        if connection is None:
+            raise ValueError("connection must not be None")
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        if flush_interval_ms <= 0:
+            raise ValueError("flush_interval_ms must be positive")
+
+        self._conn = connection
+        self._table = table_name
+        self._batch_size = batch_size
+        self._interval = flush_interval_ms / 1000.0
+        self._buffer: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="RelationalWriter-Flusher",
+        )
+        self._thread.start()
+        logger.debug(
+            "RelationalWriter initialized for table %s "
+            "(batch_size=%d, flush_interval_ms=%.0f)",
+            self._table,
+            self._batch_size,
+            flush_interval_ms,
+        )
+
+    def save(self, data: Dict[str, Any]) -> None:
+        """Add a compiled row to the in-memory buffer.
+
+        Triggers an immediate flush when the buffer reaches ``batch_size``.
+        """
+        if not isinstance(data, dict):
+            raise TypeError("data must be a dict mapping column names to values")
+
+        should_flush = False
+        with self._lock:
+            self._buffer.append(data)
+            if len(self._buffer) >= self._batch_size:
+                should_flush = True
+
+        if should_flush:
+            self._flush()
+
+    def _run(self) -> None:
+        """Background worker that flushes buffered rows on a fixed interval."""
+        while not self._stop_event.wait(self._interval):
+            try:
+                self._flush()
+            except Exception as exc:  # pragma: no cover – defensive
+                logger.exception(
+                    "Unexpected error while flushing RelationalWriter: %s", exc
+                )
+
+    def _flush(self) -> None:
+        """Bulk-insert buffered rows inside a single database transaction."""
+        with self._flush_lock:
+            with self._lock:
+                if not self._buffer:
+                    return
+                batch = self._buffer.copy()
+                self._buffer.clear()
+
+            logger.debug(
+                "Flushing %d records to table %s via execute_values",
+                len(batch),
+                self._table,
+            )
+
+            columns = list(batch[0].keys())
+            column_clause = ", ".join(columns)
+            sql = f"INSERT INTO {self._table} ({column_clause}) VALUES %s"
+            values = [tuple(row[col] for col in columns) for row in batch]
+
+            cursor = self._conn.cursor()
+            try:
+                _execute_values_bulk(cursor, sql, values, page_size=len(values))
+                self._conn.commit()
+                logger.debug("Successfully flushed %d records", len(batch))
+            except Exception:
+                self._conn.rollback()
+                with self._lock:
+                    self._buffer = batch + self._buffer
+                logger.exception(
+                    "Failed to flush RelationalWriter; records re-queued"
+                )
+                raise
+            finally:
+                close = getattr(cursor, "close", None)
+                if callable(close):
+                    close()
+
+    def shutdown(self) -> None:
+        """Stop the background flusher and persist any remaining rows."""
+        self._stop_event.set()
+        self._thread.join()
+        try:
+            self._flush()
+        except Exception as exc:  # pragma: no cover – defensive
+            logger.exception(
+                "Error during final RelationalWriter shutdown flush: %s", exc
+            )
+        logger.info(
+            "RelationalWriter shutdown complete; %d records remaining in buffer",
+            len(self._buffer),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
