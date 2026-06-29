@@ -129,7 +129,7 @@ def cross_feed_multiply(
         A deterministic integer at *output_scale* precision.
     """
     product_14 = multiply_rates(rate_a, rate_b)
-    return product_14 // SCALE_7
+    return product_14 // (SCALE_14 // output_scale)
 
 
 def floor_divide(scaled_value: int, divisor: Number) -> int:

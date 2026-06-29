@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import httpx
+from httpx import AsyncHTTPTransport
 
 from src.analytics.ema import RollingEMA
 
