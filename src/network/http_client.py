@@ -372,7 +372,7 @@ def _normalise_metric_request(
     return url, dict(params)
 
 
-def _log_timeout(url: str) -> None:
+def _log_timeout(url: str, timeout_s: float) -> None:
     """Emit a structured warning for a timed-out request.
 
     Always logs:
