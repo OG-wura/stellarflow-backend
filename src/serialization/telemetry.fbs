@@ -1,0 +1,26 @@
+namespace stellarflow;
+
+enum Flags : uint16 {
+  NONE = 0x0000,
+  LIVE = 0x0001,
+  STALE = 0x0002,
+  ANOMALY = 0x0004,
+  SYNTHETIC = 0x0008,
+  HALTED = 0x0010
+}
+
+table TelemetryFrame {
+  asset_id: [byte];
+  price: long;
+  volume: ulong;
+  timestamp: ulong;
+  sequence: uint;
+  flags: Flags;
+  feed_id: ubyte;
+}
+
+table TelemetryBundle {
+  frames: [TelemetryFrame];
+}
+
+root_type TelemetryBundle;
