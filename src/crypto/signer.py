@@ -113,7 +113,7 @@ import hashlib
 import logging
 import os
 from types import TracebackType
-from typing import Optional, Type
+from typing import Iterator, Optional, Type
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger(f"{__name__}.audit")
