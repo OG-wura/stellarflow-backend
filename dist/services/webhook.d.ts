@@ -27,6 +27,14 @@ type MonitorFailureAlertDetails = {
     lastKnownBalance: number | null;
     timestamp: Date;
 };
+type PriorityAlertDetails = {
+    currency: string;
+    rate: number;
+    zScore: number;
+    mean: number;
+    stdDev: number;
+    timestamp: Date | number;
+};
 export declare class WebhookService {
     private webhookUrl;
     private platform;
@@ -35,11 +43,13 @@ export declare class WebhookService {
     sendManualReviewNotification(reviewDetails: ReviewDetails): Promise<void>;
     sendGasBalanceAlert(alertDetails: GasBalanceAlertDetails): Promise<void>;
     sendMonitorFailureAlert(alertDetails: MonitorFailureAlertDetails): Promise<void>;
+    sendPriorityAlert(alertDetails: PriorityAlertDetails): Promise<void>;
     private postMessage;
     private formatErrorMessage;
     private formatReviewMessage;
     private formatGasBalanceAlert;
     private formatMonitorFailureAlert;
+    private formatPriorityAlert;
 }
 export declare function getWebhookService(): WebhookService;
 export declare const webhookService: WebhookService;

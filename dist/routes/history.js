@@ -74,12 +74,12 @@ const RANGE_MAP = {
 router.get("/:asset", cacheMiddleware({
     ttl: CACHE_CONFIG.ttl.history,
     keyGenerator: (req) => {
-        const asset = req.params.asset.toUpperCase();
+        const asset = req.params.asset?.toUpperCase() || '';
         const range = req.query.range || "7d";
         return CACHE_KEYS.history.asset(asset, range);
     },
 }), async (req, res) => {
-    const asset = req.params.asset.toUpperCase();
+    const asset = req.params.asset?.toUpperCase() || '';
     const rangeParam = req.query.range;
     const fromParam = req.query.from;
     const toParam = req.query.to;
