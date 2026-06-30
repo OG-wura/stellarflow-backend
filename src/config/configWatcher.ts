@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { dbSandbox } from "../security/sandbox";
 
 export interface RateLimitConfig {
   /** Rolling window duration in milliseconds (default: 900_000 = 15 min) */
@@ -10,6 +11,19 @@ export interface RateLimitConfig {
   enabled: boolean;
 }
 
+export interface SandboxConfig {
+  /** Whether subprocess sandboxing is enabled (default: true) */
+  enabled: boolean;
+  /** Maximum execution time in milliseconds (default: 30000 = 30 sec) */
+  timeoutMs: number;
+  /** Maximum memory in MB (default: 512) */
+  maxMemoryMb: number;
+  /** Whether to allow network access (default: true) */
+  allowNetwork: boolean;
+  /** Whether to allow file system writes (default: true) */
+  allowFileWrites: boolean;
+}
+
 export interface AppConfig {
   fetchIntervalMs: number;
   sorobanPollIntervalMs: number;
@@ -18,6 +32,7 @@ export interface AppConfig {
   cacheDurationMs: number;
   batchWindowMs: number;
   rateLimit: RateLimitConfig;
+  sandbox: SandboxConfig;
 }
 
 export const CONFIG_PATH = path.resolve(process.cwd(), "config.json");
@@ -34,34 +49,75 @@ const DEFAULTS: AppConfig = {
     maxRequests: 100,
     enabled: true,
   },
+  sandbox: {
+    enabled: true,
+    timeoutMs: 30000,
+    maxMemoryMb: 512,
+    allowNetwork: true,
+    allowFileWrites: true,
+  },
 };
 
-function loadConfig(): AppConfig {
+function deepFreeze<T extends object>(obj: T): Readonly<T> {
+  for (const value of Object.values(obj)) {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      !Object.isFrozen(value)
+    ) {
+      deepFreeze(value as object);
+    }
+  }
+  return Object.freeze(obj);
+}
+
+function buildConfig(parsed: Partial<AppConfig>): Readonly<AppConfig> {
+  return deepFreeze({
+    ...DEFAULTS,
+    ...parsed,
+    rateLimit: { ...DEFAULTS.rateLimit, ...(parsed.rateLimit ?? {}) },
+    sandbox: { ...DEFAULTS.sandbox, ...(parsed.sandbox ?? {}) },
+  });
+}
+
+function loadConfig(): Readonly<AppConfig> {
   try {
     const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    const parsed: Partial<AppConfig> = JSON.parse(raw);
-    return {
-      ...DEFAULTS,
-      ...parsed,
-      rateLimit: { ...DEFAULTS.rateLimit, ...(parsed.rateLimit ?? {}) },
-    };
+    return buildConfig(JSON.parse(raw) as Partial<AppConfig>);
   } catch {
-    return { ...DEFAULTS, rateLimit: { ...DEFAULTS.rateLimit } };
+    return buildConfig({});
   }
 }
 
-// Singleton in-memory config — mutated on reload
-export const appConfig: AppConfig = loadConfig();
+// Internal mutable reference — replaced atomically on reload; never mutated in place
+let _appConfig: Readonly<AppConfig> = loadConfig();
+
+/** Returns the current frozen application configuration snapshot. */
+export function getAppConfig(): Readonly<AppConfig> {
+  return _appConfig;
+}
+
+/**
+ * @deprecated Use {@link getAppConfig} instead.
+ * Kept for backward compatibility — reads from the same internal reference.
+ */
+export const appConfig: Readonly<AppConfig> = new Proxy(
+  {} as Readonly<AppConfig>,
+  {
+    get(_target, prop) {
+      return (_appConfig as Record<string | symbol, unknown>)[prop];
+    },
+  },
+);
 
 /**
  * Starts a fs.watch watcher on config.json.
- * On change, merges the new values into the shared `appConfig` object so all
- * consumers that hold a reference to it see the update immediately.
+ * On change, builds a new frozen config and replaces the internal reference atomically.
  * Calls the optional `onChange` callback with the updated config after each reload.
  * Returns a cleanup function that stops the watcher.
  */
 export function watchConfig(
-  onChange?: (config: AppConfig) => void,
+  onChange?: (config: Readonly<AppConfig>) => void,
 ): () => void {
   if (!fs.existsSync(CONFIG_PATH)) {
     console.warn(
@@ -70,21 +126,21 @@ export function watchConfig(
     return () => {};
   }
 
-  const watcher = fs.watch(CONFIG_PATH, (event) => {
+  const watcher = fs.watch(CONFIG_PATH, (event: string) => {
     if (event !== "change") return;
     try {
       const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-      const updated: Partial<AppConfig> = JSON.parse(raw);
-      Object.assign(appConfig, DEFAULTS, updated);
-      if (updated.rateLimit) {
-        Object.assign(
-          appConfig.rateLimit,
-          DEFAULTS.rateLimit,
-          updated.rateLimit,
-        );
+      const updated = buildConfig(JSON.parse(raw) as Partial<AppConfig>);
+      _appConfig = updated;
+      if (updated.sandbox) {
+        try {
+          dbSandbox.syncWithConfig(updated);
+        } catch (err) {
+          console.error("[ConfigWatcher] Failed to sync sandbox policy:", err);
+        }
       }
-      console.info("[ConfigWatcher] config.json reloaded:", appConfig);
-      onChange?.(appConfig);
+      console.info("[ConfigWatcher] config.json reloaded:", updated);
+      onChange?.(updated);
     } catch (err) {
       console.error("[ConfigWatcher] Failed to reload config.json:", err);
     }

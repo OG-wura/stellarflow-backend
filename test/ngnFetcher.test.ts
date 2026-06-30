@@ -72,19 +72,13 @@ async function run() {
     assert.equal(rate.rate, expectedRate);
     assert.equal(
       rate.source,
-      "Median of 3 sources",
+      "Weighted average of 3 sources (outliers filtered)",
     );
     assert.equal(Array.isArray(rate.rawResponses), true);
     assert.equal(rate.rawResponses?.length, 5);
     assert.deepEqual(
       rate.rawResponses?.map((entry) => entry.provider),
-      [
-        "VTpass",
-        "CoinGecko",
-        "CoinGecko",
-        "CoinGecko",
-        "ExchangeRate API",
-      ],
+      ["VTpass", "CoinGecko", "CoinGecko", "CoinGecko", "ExchangeRate API"],
     );
   } finally {
     axios.get = originalGet;

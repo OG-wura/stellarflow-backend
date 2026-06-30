@@ -3,7 +3,7 @@ import { sendApiError } from "../lib/apiError.js";
 import { logger } from "../utils/logger";
 
 // Regexes to detect SQLi and XSS-like patterns (including common encoded forms)
-const suspiciousPattern = /(<script\b|<\/script>|onerror=|onload=|javascript:)|\b(select|union|insert|update|delete|drop|alter|create|exec)\b|['"`;--]|%27|%3C|%3E|%3B/i;
+const suspiciousPattern = /(<script\b|<\/script>|onerror=|onload=|javascript:)|\b(select|union|insert|update|delete|drop|alter|create|exec)\b|['";`\-]|%27|%3C|%3E|%3B/i;
 const strictParamPattern = /[<>{}"'`;\-]|%27|%3C|%3E|%3B/;
 
 /**
@@ -27,7 +27,10 @@ export function inspectHeadersMiddleware(
         if (suspiciousPattern.test(v)) {
           logger.warn("[SECURITY] Suspicious header detected", {
             header: name,
-            value: typeof v === "string" && v.length > 200 ? `${v.slice(0, 200)}...` : v,
+            value:
+              typeof v === "string" && v.length > 200
+                ? `${v.slice(0, 200)}...`
+                : v,
             ip: req.ip,
             path: req.path,
           });
@@ -72,7 +75,8 @@ export function createStrictModeMiddleware(options: StrictOptions = {}) {
   return (req: Request, res: Response, next: NextFunction): void => {
     try {
       const envEnabled = process.env.STRICT_MODE === "true";
-      const headerEnabled = String(req.headers[toggleHeader] || "").toLowerCase() === "true";
+      const headerEnabled =
+        String(req.headers[toggleHeader] || "").toLowerCase() === "true";
       const enabled = Boolean(options.enabled) || envEnabled || headerEnabled;
 
       if (!enabled) {
@@ -85,7 +89,9 @@ export function createStrictModeMiddleware(options: StrictOptions = {}) {
         if (Array.isArray(val)) val = val[0];
         if (typeof val !== "string") val = String(val);
         // trim and check for suspicious characters or encoded equivalents
-        return strictParamPattern.test(val) || /\b(or|and)\b\s+\d+=\d+/i.test(val);
+        return (
+          strictParamPattern.test(val) || /\b(or|and)\b\s+\d+=\d+/i.test(val)
+        );
       };
 
       const { symbol, provider } = req.query as Record<string, any>;
@@ -98,7 +104,12 @@ export function createStrictModeMiddleware(options: StrictOptions = {}) {
           provider,
         });
 
-        sendApiError(res, 400, "BAD_REQUEST", "Strict Mode: suspicious characters in query parameters");
+        sendApiError(
+          res,
+          400,
+          "BAD_REQUEST",
+          "Strict Mode: suspicious characters in query parameters",
+        );
         return;
       }
 
