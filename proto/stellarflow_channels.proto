@@ -1,0 +1,54 @@
+syntax = "proto3";
+package stellarflow.channels;
+
+message PriceUpdate {
+  string asset_id = 1;
+  int64  price = 2;
+  int64  volume = 3;
+  uint64 timestamp = 4;
+  uint32 sequence = 5;
+  uint32 flags = 6;
+  uint32 feed_id = 7;
+}
+
+message SignatureRequest {
+  bytes  tx_hash = 1;
+  bytes  public_key = 2;
+  uint32 account_id = 3;
+}
+
+message SignatureResponse {
+  bytes  signature = 1;
+  bool   ok = 2;
+  string error = 3;
+}
+
+message TelemetryFrame {
+  bytes  asset_id = 1;
+  int64  price = 2;
+  int64  volume = 3;
+  uint64 timestamp = 4;
+  uint32 sequence = 5;
+  uint32 flags = 6;
+  uint32 feed_id = 7;
+}
+
+message TelemetryBundle {
+  repeated TelemetryFrame frames = 1;
+  uint64 bundle_sequence = 2;
+}
+
+message Heartbeat {
+  string service = 1;
+  uint64 timestamp = 2;
+  bool   alive = 3;
+  string status = 4;
+}
+
+message MessageEnvelope {
+  string  channel = 1;
+  string  content_type = 2;
+  bytes   payload = 3;
+  uint64  timestamp = 4;
+  string  source = 5;
+}

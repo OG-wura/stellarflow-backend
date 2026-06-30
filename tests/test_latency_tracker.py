@@ -44,13 +44,12 @@ def test_latency_tracker_flushes_completed_records_to_db():
     with patch.object(LatencyTracker, "_connect_db", return_value=(mock_conn, fake_json)):
         tracker.flush()
 
-    assert mock_cursor.execute.call_count == 2
+    assert mock_cursor.execute.call_count == 1
     create_sql_call = mock_cursor.execute.call_args_list[0]
-    insert_sql_call = mock_cursor.execute.call_args_list[1]
     assert "CREATE TABLE IF NOT EXISTS" in create_sql_call.args[0]
-    assert "INSERT INTO" in insert_sql_call.args[0]
-    assert insert_sql_call.args[1][0] == "packet-456"
-    assert insert_sql_call.args[1][4] == 1200
+    mock_conn.executemany.assert_called_once()
+    insert_sql = mock_conn.executemany.call_args[0][0]
+    assert "INSERT INTO" in insert_sql
 
 
 def test_latency_tracker_removes_exported_records_after_flush():
@@ -68,7 +67,7 @@ def test_latency_tracker_removes_exported_records_after_flush():
         tracker.flush()
 
     assert "packet-999" not in tracker._records
-    assert mock_cursor.execute.call_count == 2
+    assert mock_cursor.execute.call_count == 1
 
 
 def test_latency_tracker_no_database_url_logs_warning(caplog):

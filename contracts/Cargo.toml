@@ -1,0 +1,15 @@
+[package]
+name = "stellarflow-contracts"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "StellarFlow Soroban smart contracts — ledger gap enforcement and zero-allocation signature verification."
+
+[dependencies]
+soroban-sdk = "21.5.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "21.5.0", features = ["testutils"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

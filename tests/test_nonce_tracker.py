@@ -292,3 +292,123 @@ def test_invalid_window_size_raises() -> None:
         NonceWindow(window_size=0)
     with pytest.raises(ValueError):
         NonceWindow(window_size=-1)
+
+
+def test_rpc_node_failover_supervisor_basic(monkeypatch) -> None:
+    import time
+    from network.nonce_tracker import RPCNodeFailoverSupervisor
+    import requests
+
+    endpoints = [
+        "https://rpc-primary.stellar.org",
+        "https://rpc-secondary.stellar.org",
+    ]
+
+    class MockResponse:
+        status_code = 200
+
+        def json(self):
+            return {"result": {"network": "testnet"}}
+
+    mock_calls = []
+
+    def mock_post(url, json=None, timeout=None):
+        mock_calls.append(url)
+        return MockResponse()
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    supervisor = RPCNodeFailoverSupervisor(
+        endpoints=endpoints,
+        check_interval_sec=0.1,
+        latency_threshold_ms=100.0,
+        ping_timeout_sec=0.5,
+    )
+
+    assert supervisor.get_active_endpoint() == endpoints[0]
+
+    supervisor.start()
+    time.sleep(0.3)
+    supervisor.stop()
+
+    assert len(mock_calls) > 0
+    assert endpoints[0] in mock_calls
+
+
+def test_rpc_node_failover_supervisor_latency_failover(monkeypatch) -> None:
+    import time
+    from network.nonce_tracker import RPCNodeFailoverSupervisor
+    import requests
+
+    endpoints = [
+        "https://rpc-primary.stellar.org",
+        "https://rpc-secondary.stellar.org",
+    ]
+
+    def mock_post(url, json=None, timeout=None):
+        class MockResponse:
+            status_code = 200
+
+            def json(self):
+                return {"result": {"network": "testnet"}}
+
+        if "primary" in url:
+            time.sleep(0.15)
+        return MockResponse()
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    supervisor = RPCNodeFailoverSupervisor(
+        endpoints=endpoints,
+        check_interval_sec=0.1,
+        latency_threshold_ms=100.0,
+        ping_timeout_sec=0.5,
+    )
+
+    assert supervisor.get_active_endpoint() == endpoints[0]
+
+    supervisor.start()
+    time.sleep(0.3)
+    supervisor.stop()
+
+    assert supervisor.get_active_endpoint() == endpoints[1]
+
+
+def test_rpc_node_failover_supervisor_failure_failover(monkeypatch) -> None:
+    import time
+    from network.nonce_tracker import RPCNodeFailoverSupervisor
+    import requests
+
+    endpoints = [
+        "https://rpc-primary.stellar.org",
+        "https://rpc-secondary.stellar.org",
+    ]
+
+    def mock_post(url, json=None, timeout=None):
+        class MockResponse:
+            status_code = 200
+
+            def json(self):
+                return {"result": {"network": "testnet"}}
+
+        if "primary" in url:
+            raise requests.exceptions.ConnectionError("Connection refused")
+        return MockResponse()
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    supervisor = RPCNodeFailoverSupervisor(
+        endpoints=endpoints,
+        check_interval_sec=0.1,
+        latency_threshold_ms=100.0,
+        ping_timeout_sec=0.5,
+    )
+
+    assert supervisor.get_active_endpoint() == endpoints[0]
+
+    supervisor.start()
+    time.sleep(0.3)
+    supervisor.stop()
+
+    assert supervisor.get_active_endpoint() == endpoints[1]
+
