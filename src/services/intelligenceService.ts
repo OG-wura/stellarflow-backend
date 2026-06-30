@@ -146,7 +146,7 @@ export class IntelligenceService {
       orderBy: { code: "asc" },
     })) || [];
 
-    const currencyCodes = activeCurrencies.map((currency) => currency.code);
+    const currencyCodes = activeCurrencies.map((currency: { code: string }) => currency.code);
 
     if (currencyCodes.length === 0) {
       return {
