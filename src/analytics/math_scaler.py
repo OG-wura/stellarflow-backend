@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Union
+from fractions import Fraction
+
 
 # ---------------------------------------------------------------------------
 # Scale constants
@@ -19,7 +21,6 @@ _D_SCALE_7 = Decimal(SCALE_7)
 _D_SCALE_14 = Decimal(SCALE_14)
 
 Number = Union[int, float, Decimal]
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -129,7 +130,7 @@ def cross_feed_multiply(
         A deterministic integer at *output_scale* precision.
     """
     product_14 = multiply_rates(rate_a, rate_b)
-    return product_14 // SCALE_7
+    return product_14 // (SCALE_14 // output_scale)
 
 
 def floor_divide(scaled_value: int, divisor: Number) -> int:
@@ -156,34 +157,136 @@ def floor_divide(scaled_value: int, divisor: Number) -> int:
     return (scaled_value * SCALE_7) // divisor_int
 
 
+def sqrt_scaled(value: int, scale: int = SCALE_7) -> int:
+    """Return the fixed-point square root of a scaled integer.
+
+    ``value`` is expected to be scaled by *scale*, and the returned integer uses
+    the same scale.  The calculation is strictly integer-only:
+
+    ``sqrt(value / scale) * scale == sqrt(value * scale)``
+
+    The final square root is calculated with binary search and floors toward
+    zero, matching the truncation behavior used across this module.
+    """
+    if isinstance(value, bool):
+        raise TypeError("value must be an integer, not bool.")
+    if not isinstance(value, int):
+        raise TypeError("value must be a scaled integer.")
+    if isinstance(scale, bool) or not isinstance(scale, int):
+        raise TypeError("scale must be an integer.")
+    if value < 0:
+        raise ValueError("Cannot calculate square root of a negative value.")
+    if scale <= 0:
+        raise ValueError("scale must be positive.")
+
+    radicand = value * scale
+    if radicand < 2:
+        return radicand
+
+    low = 0
+    high = radicand
+    answer = 0
+
+    while low <= high:
+        mid = (low + high) // 2
+        square = mid * mid
+        if square <= radicand:
+            answer = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return answer
+
+
 def pack_rate(value: Number) -> int:
     """Convenience wrapper: scale *value* to a ``SCALE_7`` integer for payload packing.
 
     This is the canonical entry-point used before serialising a rate into any
-    Soroban contract data payload.  It enforces the ``10^7`` fixed-integer base
+    Soroban contract data payload. It enforces the ``10^7`` fixed-integer base
     contract and rejects non-finite or boolean inputs early.
-
-    Parameters
-    ----------
-    value:
-        Raw exchange rate (int, float, or Decimal).
-
-    Returns
-    -------
-    int
-        Deterministic ``SCALE_7`` integer ready for transmission.
     """
     return scale_up(value, SCALE_7)
+
+
+ConversionMatrix = dict[str, dict[str, Fraction]]
+
+
+def build_conversion_matrix(
+    rates: dict[tuple[str, str], Number],
+) -> ConversionMatrix:
+    """
+    Build an exact fraction-based conversion matrix.
+    """
+    matrix: ConversionMatrix = {}
+
+    for (source, target), rate in rates.items():
+        matrix.setdefault(source, {})
+
+        decimal_rate = _to_decimal(rate)
+        matrix[source][target] = Fraction(decimal_rate)
+
+    return matrix
+
+
+def convert_path(
+    matrix: ConversionMatrix,
+    path: list[str],
+) -> Fraction:
+    """
+    Compute an exact conversion along a multi-hop path.
+    """
+    if len(path) < 2:
+        return Fraction(1)
+
+    result = Fraction(1)
+
+    for src, dst in zip(path, path[1:]):
+        try:
+            result *= matrix[src][dst]
+        except KeyError as exc:
+            raise KeyError(f"Missing conversion rate: {src} -> {dst}") from exc
+
+    return result
+
+
+def fraction_to_scaled(
+    value: Fraction,
+    factor: int = SCALE_7,
+) -> int:
+    """
+    Convert an exact Fraction into a SCALE_7 integer.
+    """
+    return scale_up(
+        Decimal(value.numerator) / Decimal(value.denominator),
+        factor,
+    )
+
+
+def scaled_to_fraction(
+    value: int,
+    factor: int = SCALE_7,
+) -> Fraction:
+    """
+    Convert a SCALE_7 integer into an exact Fraction.
+    """
+    return Fraction(value, factor)
 
 
 __all__ = [
     "SCALE_7",
     "SCALE_14",
     "Number",
+    "ConversionMatrix",
     "scale_up",
     "scale_down",
     "multiply_rates",
     "cross_feed_multiply",
     "floor_divide",
+    "sqrt_scaled",
     "pack_rate",
+    "build_conversion_matrix",
+    "convert_path",
+    "fraction_to_scaled",
+    "scaled_to_fraction",
 ]

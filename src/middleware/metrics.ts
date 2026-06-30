@@ -47,6 +47,36 @@ export const httpRequestsTotal = new promClient.Counter({
 });
 register.registerMetric(httpRequestsTotal);
 
+export const successfulSubmissions = new promClient.Counter({
+  name: "multi_sig_successful_submissions_total",
+  help: "Total successful multi-sig submissions",
+  labelNames: ["asset"],
+});
+register.registerMetric(successfulSubmissions);
+
+export const failedSubmissions = new promClient.Counter({
+  name: "multi_sig_failed_submissions_total",
+  help: "Total failed multi-sig submissions",
+  labelNames: ["asset", "reason"],
+});
+register.registerMetric(failedSubmissions);
+
+export const gasUsagePerAsset = new promClient.Histogram({
+  name: "multi_sig_gas_usage_stroops",
+  help: "Gas usage per asset in stroops",
+  labelNames: ["asset"],
+  buckets: [100000, 500000, 1000000, 5000000, 10000000],
+});
+register.registerMetric(gasUsagePerAsset);
+
+export const submissionDuration = new promClient.Histogram({
+  name: "multi_sig_submission_duration_seconds",
+  help: "Duration of multi-sig submission flow in seconds",
+  labelNames: ["asset"],
+  buckets: [1, 5, 10, 30, 60, 120],
+});
+register.registerMetric(submissionDuration);
+
 export const metricsMiddleware = (
   req: Request,
   res: Response,

@@ -10,7 +10,10 @@ import {
   Account,
 } from "@stellar/stellar-sdk";
 import stellarProvider from "../lib/stellarProvider";
-import { getStellarNetworkPassphrase } from "../lib/stellarNetwork";
+import {
+  getStellarNetwork,
+  getStellarNetworkPassphrase,
+} from "../lib/stellarNetwork";
 import { sequenceManager } from "./sequence-manager";
 import { assertSigningAllowed } from "../state/appState";
 import { signer } from "../signer";
@@ -110,7 +113,15 @@ export class StellarService {
       baseFee,
     );
 
-    logger.networkInfo(`✅ Price update for ${currency} confirmed. Hash: ${result.hash}`, { hash: result.hash });
+    const network = getStellarNetwork();
+    const txURL = network === "TESTNET"
+      ? `https://testnet.stellarexpert.org/tx/${result.hash}`
+      : `https://stellarexpert.org/tx/${result.hash}`;
+
+    logger.networkInfo(
+      `✅ Price update for ${currency} confirmed. Hash: ${result.hash} | StellarExpert: ${txURL}`,
+      { hash: result.hash, url: txURL },
+    );
     return result.hash;
   }
 
@@ -154,7 +165,15 @@ export class StellarService {
     );
 
     const currencies = updates.map((u) => u.currency).join(", ");
-    logger.networkInfo(`✅ Batched price update for [${currencies}] confirmed. Hash: ${result.hash}`, { hash: result.hash, currencies });
+    const network = getStellarNetwork();
+    const txURL = network === "TESTNET"
+      ? `https://testnet.stellarexpert.org/tx/${result.hash}`
+      : `https://stellarexpert.org/tx/${result.hash}`;
+
+    logger.networkInfo(
+      `✅ Batched price update for [${currencies}] confirmed. Hash: ${result.hash} | StellarExpert: ${txURL}`,
+      { hash: result.hash, url: txURL, currencies },
+    );
     return result.hash;
   }
 
@@ -191,7 +210,15 @@ export class StellarService {
       baseFee,
     );
 
-    logger.networkInfo(`✅ Multi-signed price update for ${currency} confirmed. Hash: ${result.hash}`, { hash: result.hash });
+    const network = getStellarNetwork();
+    const txURL = network === "TESTNET"
+      ? `https://testnet.stellarexpert.org/tx/${result.hash}`
+      : `https://stellarexpert.org/tx/${result.hash}`;
+
+    logger.networkInfo(
+      `✅ Multi-signed price update for ${currency} confirmed. Hash: ${result.hash} | StellarExpert: ${txURL}`,
+      { hash: result.hash, url: txURL },
+    );
     return result.hash;
   }
 

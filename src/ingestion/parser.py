@@ -5,12 +5,67 @@ metadata (for example: ``{"data": {"ticker": {...}}}`` or batched
 ``{"frames": [...]}``). This module collapses those nested payloads into
 uniform, flat tuple segments so the analytics engine can consume a stable
 shape with minimal Python object churn.
+
+SIMD Acceleration
+-----------------
+When ``pysimdjson`` is installed (``pip install pysimdjson``), the raw JSON
+decode step is handled by a thread-local ``simdjson.Parser`` that exploits
+SIMD vectorization (SSE4.2 / AVX2 / AVX-512 depending on host CPU).  The
+parser is reused across calls on the same OS thread to avoid repeated C++
+heap allocations.
+
+If the native extension is not available the module falls back silently to
+``json.loads``, keeping the pipeline functional in any environment.  The
+:data:`SIMDJSON_AVAILABLE` flag is exported so callers can introspect which
+path is active at runtime.
 """
 
 from __future__ import annotations
 
+import json
+import threading
 from collections.abc import Iterable, Iterator, Mapping
 from typing import TypeAlias, cast
+
+# ---------------------------------------------------------------------------
+# SIMD-accelerated JSON back-end (optional)
+# ---------------------------------------------------------------------------
+try:
+    import simdjson as _simdjson  # type: ignore[import-untyped]
+
+    # Thread-local storage: each worker thread gets its own Parser instance so
+    # concurrent ingestion goroutines cannot race on shared C++ parser state.
+    _tl = threading.local()
+
+    def _simd_decode(raw: bytes) -> object:
+        """Decode *raw* bytes via simdjson, reusing the per-thread Parser.
+
+        Returns a ``Mapping``-compatible proxy object backed by the C++
+        simdjson document.  The proxy supports ``__getitem__``, ``.get()``,
+        and the ``collections.abc.Mapping`` protocol, so the rest of this
+        module's traversal logic requires no changes.
+
+        Thread safety: each OS thread owns a dedicated ``simdjson.Parser``
+        instance stored in ``threading.local()``.
+        """
+        parser: _simdjson.Parser = getattr(_tl, "parser", None)
+        if parser is None:
+            parser = _simdjson.Parser()
+            _tl.parser = parser
+        return parser.parse(raw)
+
+    SIMDJSON_AVAILABLE: bool = True
+
+except ImportError:  # pragma: no cover — exercised by test_parser_fallback_path
+    def _simd_decode(raw: bytes) -> object:  # type: ignore[misc]
+        """Fallback: standard-library JSON decode."""
+        return json.loads(raw)
+
+    SIMDJSON_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Type aliases
+# ---------------------------------------------------------------------------
 
 TelemetryTuple: TypeAlias = tuple[str, float, int, int, int]
 TelemetrySegment: TypeAlias = tuple[TelemetryTuple, ...]
@@ -18,6 +73,10 @@ TelemetrySegmentBatch: TypeAlias = tuple[TelemetrySegment, ...]
 SequencePayload: TypeAlias = list[object] | tuple[object, ...]
 
 DEFAULT_SEGMENT_SIZE = 256
+
+# ---------------------------------------------------------------------------
+# Field-name look-up tables (ordered by likelihood of appearance)
+# ---------------------------------------------------------------------------
 
 _ASSET_KEYS = ("asset_id", "asset", "symbol", "pair", "instrument")
 _PRICE_KEYS = ("price", "last_price", "last", "mark_price", "value")
@@ -31,6 +90,11 @@ _FRAME_KEYS = ("frame", "tick", "ticker", "telemetry")
 
 _NON_STRING_SEQUENCES = (list, tuple)
 _MISSING = object()
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _first_present(
@@ -127,6 +191,63 @@ def _as_sequence(value: object) -> SequencePayload | None:
     if isinstance(value, _NON_STRING_SEQUENCES):
         return cast(SequencePayload, value)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Public API — ingestion entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_raw_pack(
+    raw: bytes,
+    *,
+    drop_invalid: bool = False,
+) -> TelemetrySegment:
+    """Decode a raw JSON B2C pack and flatten all contained ticker frames.
+
+    This is the primary ingestion entry point for incoming binary payloads
+    received over websocket or REST transport.  The raw bytes are decoded
+    using the SIMD-accelerated back-end when ``pysimdjson`` is available,
+    falling back to ``json.loads`` otherwise.
+
+    Parameters
+    ----------
+    raw:
+        Raw JSON-encoded bytes.  Must be a single JSON value (object or
+        array) — newline delimiting is handled upstream by
+        :class:`~ingestion.stream_buffer.StreamBuffer`.
+    drop_invalid:
+        When ``True`` frames that fail field extraction are silently skipped.
+        When ``False`` (the default) the first malformed frame raises.
+
+    Returns
+    -------
+    TelemetrySegment
+        Immutable tuple of :data:`TelemetryTuple` records in the order they
+        were encountered inside *raw*.
+
+    Raises
+    ------
+    ValueError
+        If *raw* is empty.
+    json.JSONDecodeError / simdjson.InvalidJSON
+        If *raw* is not valid JSON.
+    """
+    if not raw:
+        raise ValueError("raw pack must not be empty")
+
+    decoded = _simd_decode(raw)
+
+    # A top-level array is unpacked as individual payloads; any other value
+    # (object, scalar) is wrapped in a list so the flattening loop sees a
+    # uniform iterable.
+    payloads: list[object] = list(decoded) if isinstance(decoded, (list, tuple)) else [decoded]
+    return flatten_telemetry_frames(payloads, drop_invalid=drop_invalid)
+
+
+# ---------------------------------------------------------------------------
+# Public API — streaming / iterator helpers
+# ---------------------------------------------------------------------------
 
 
 def iter_flat_ticker_tuples(
@@ -435,6 +556,7 @@ def build_segments_from_stream(
 
 __all__ = [
     "DEFAULT_SEGMENT_SIZE",
+    "SIMDJSON_AVAILABLE",
     "TelemetrySegment",
     "TelemetrySegmentBatch",
     "TelemetryTuple",
@@ -442,5 +564,5 @@ __all__ = [
     "build_telemetry_segments",
     "flatten_telemetry_frames",
     "iter_flat_ticker_tuples",
-    "iter_price_events_from_stream",
+    "parse_raw_pack",
 ]
