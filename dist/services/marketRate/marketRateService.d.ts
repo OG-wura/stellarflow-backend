@@ -11,6 +11,7 @@ export declare class MarketRateService {
     private pendingSubmissions;
     private batchTimeout;
     private readonly crossPairLogger;
+    private backpressureManager;
     private get CACHE_DURATION_MS();
     private get BATCH_WINDOW_MS();
     constructor();
@@ -34,6 +35,14 @@ export declare class MarketRateService {
         cached: boolean;
         expiry?: Date;
     }>;
+    /**
+     * Get backpressure metrics for monitoring queue health
+     */
+    getBackpressureMetrics(): any;
+    /**
+     * Reset backpressure metrics (useful for testing)
+     */
+    resetBackpressureMetrics(): void;
     private requestRemoteSignaturesAsync;
     private runCrossPairCheck;
 }

@@ -1,9 +1,8 @@
-import { BackpressureManager, PacketPriority } from '../queue/backpressure';
+import { BackpressureManager, PacketPriority } from "../queue/backpressure";
 import prisma from "../lib/prisma";
 import { broadcastToSessions } from "../lib/socket";
 import stellarProvider from "../lib/stellarProvider";
 import dotenv from "dotenv";
-import { signer } from "../signer";
 import { logger } from "../utils/logger";
 dotenv.config();
 export class SorobanEventListener {
@@ -15,9 +14,18 @@ export class SorobanEventListener {
     lastProcessedLedger = 0;
     pollTimer = null;
     constructor(pollIntervalMs = 15000) {
+        const secret = process.env.ORACLE_SECRET_KEY ??
+            process.env.SOROBAN_ADMIN_SECRET ??
+            process.env.STELLAR_SECRET;
+        if (!secret) {
+            throw new Error("Stellar secret key not found in environment variables. Please set STELLAR_SECRET or SOROBAN_ADMIN_SECRET.");
+        }
         this.oraclePublicKey = "";
         this.pollIntervalMs = pollIntervalMs;
         this.server = stellarProvider.getServer();
+    }
+    getOraclePublicKey() {
+        return this.oraclePublicKey;
     }
     async start() {
         if (this.isRunning) {
@@ -25,6 +33,7 @@ export class SorobanEventListener {
             return;
         }
         this.isRunning = true;
+        const { signer } = await import("../signer/index.js");
         this.oraclePublicKey = await signer.getPublicKey();
         logger.info(`[EventListener] Starting listener for account ${this.oraclePublicKey}`);
         const lastRecord = await prisma.onChainPrice.findFirst({
@@ -39,6 +48,15 @@ export class SorobanEventListener {
         // Initial poll
         await this.pollTransactions();
         // Start periodic polling
+        this.startPollingTimer();
+    }
+    restart(pollIntervalMs) {
+        this.stop();
+        if (pollIntervalMs !== undefined)
+            this.pollIntervalMs = pollIntervalMs;
+        this.start().catch((err) => logger.error("[EventListener] Restart failed:", err));
+    }
+    startPollingTimer() {
         this.pollTimer = setInterval(() => {
             this.pollTransactions().catch((err) => {
                 logger.networkError("[EventListener] Poll error:", { err });
@@ -51,7 +69,7 @@ export class SorobanEventListener {
     async startWorker() {
         logger.info("[Worker] Backpressure consumer loop started.");
         while (this.isRunning) {
-            const packet = this.bpManager.dequeue();
+            const packet = await this.bpManager.dequeue();
             if (packet) {
                 try {
                     const price = packet.data;
@@ -77,7 +95,7 @@ export class SorobanEventListener {
             }
             else {
                 // Wait 100ms if queue is empty to prevent CPU spinning
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise((resolve) => setTimeout(resolve, 100));
             }
         }
     }
@@ -102,9 +120,10 @@ export class SorobanEventListener {
                     const packet = {
                         priority: PacketPriority.STANDARD, // Using Standard for financial data
                         data: price,
-                        timestamp: Date.now()
+                        timestamp: Date.now(),
                     };
-                    if (this.bpManager.enqueue(packet)) {
+                    const accepted = await this.bpManager.enqueue(packet);
+                    if (accepted) {
                         // Update tracking only if it was accepted by queue
                         if (price.ledgerSeq > this.lastProcessedLedger) {
                             this.lastProcessedLedger = price.ledgerSeq;
@@ -144,13 +163,19 @@ export class SorobanEventListener {
                 if (isNaN(rate))
                     continue;
                 confirmedPrices.push({
-                    currency, rate, txHash: tx.hash, memoId,
-                    ledgerSeq: tx.ledger_attr, confirmedAt: new Date(tx.created_at),
+                    currency,
+                    rate,
+                    txHash: tx.hash,
+                    memoId,
+                    ledgerSeq: tx.ledger_attr,
+                    confirmedAt: new Date(tx.created_at),
                 });
             }
         }
         catch (error) {
-            logger.networkError(`[EventListener] Error parsing tx ${tx.hash}:`, { error });
+            logger.networkError(`[EventListener] Error parsing tx ${tx.hash}:`, {
+                error,
+            });
         }
         return confirmedPrices;
     }
@@ -161,6 +186,8 @@ export class SorobanEventListener {
         this.isRunning = false;
         logger.info("[EventListener] Stopped");
     }
-    isActive() { return this.isRunning; }
+    isActive() {
+        return this.isRunning;
+    }
 }
 //# sourceMappingURL=sorobanEventListener.js.map

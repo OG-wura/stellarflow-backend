@@ -3,7 +3,7 @@ import { signer } from "../signer";
 import dotenv from "dotenv";
 import axios from "axios";
 import { assertSigningAllowed } from "../state/appState";
-import { successfulSubmissions, failedSubmissions, gasUsagePerAsset, submissionDuration, } from "../metrics";
+import { successfulSubmissions, failedSubmissions, gasUsagePerAsset, submissionDuration, } from "../metrics/index.js";
 dotenv.config();
 export class MultiSigService {
     localSignerPublicKey = "";

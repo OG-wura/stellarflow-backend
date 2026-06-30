@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Deque, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -17,7 +17,7 @@ class SlidingWindowBuffer(Generic[T]):
     MAX_ENTRIES: int = 100
 
     def __init__(self, maxlen: int = MAX_ENTRIES) -> None:
-        self._buffer: Deque[T] = deque(maxlen=maxlen)
+        self._buffer: deque[T] = deque(maxlen=maxlen)
 
     def append(self, item: T) -> None:
         self._buffer.append(item)
