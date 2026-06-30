@@ -27,7 +27,7 @@ export class AnomalyDetectionService {
       take: this.HISTORY_LIMIT,
     });
 
-    const rates = history.map((h) => Number(h.rate));
+    const rates = history.map((h: { rate: any }) => Number(h.rate));
     const n = rates.length;
 
     if (n < this.MIN_SAMPLE_SIZE) {
@@ -40,9 +40,9 @@ export class AnomalyDetectionService {
       };
     }
 
-    const mean = rates.reduce((a, b) => a + b, 0) / n;
+    const mean = rates.reduce((a: number, b: number) => a + b, 0) / n;
     const variance =
-      rates.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1);
+      rates.reduce((a: number, b: number) => a + Math.pow(b - mean, 2), 0) / (n - 1);
     const stdDev = Math.sqrt(variance);
 
     // Handle edge case where stdDev is 0 (all historical rates are the same)

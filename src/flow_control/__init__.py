@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from queue.backpressure import (
+from flow_control.backpressure import (
     TokenBucket,
     TokenBucketConfig,
     TokenBucketController,
