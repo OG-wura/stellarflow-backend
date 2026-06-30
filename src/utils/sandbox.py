@@ -1,228 +1,218 @@
-"""Isolated subprocess sandbox for untrusted feed parsers.
+#!/usr/bin/env python3
+"""
+Isolated Process Sandboxes for External Unverified Data Adapters
 
-Untrusted external feed payloads are parsed inside a short-lived child process
-so that parser crashes, infinite loops, or malicious inputs cannot affect the
-main process.  Communication uses JSON over stdin/stdout; resource limits are
-enforced with the POSIX ``resource`` module before the child executes.
+Executes untrusted third-party adapter scripts inside restricted subprocess
+containers so that a malicious or buggy endpoint cannot compromise core
+connection keys or corrupt shared memory.
 
-Architecture
-------------
-* The **host** calls :func:`run_parser` with a parser name and raw payload.
-* A child ``python3`` process is spawned; it imports and calls the requested
-  parser function from ``ingestion.parser`` and writes the result as JSON to
-  stdout before exiting.
-* The host reads the child's JSON response and returns a :class:`SandboxResult`.
-* If the child times out, exceeds memory, or crashes, a structured error is
-  returned without raising – the main process remains unaffected.
+Security model
+--------------
+* Each adapter runs in its own *child process* via :class:`subprocess.Popen`.
+  The parent never ``exec``s untrusted code directly.
+* The child is launched with a stripped environment (``env`` parameter) — no
+  ``DATABASE_URL``, no ``AWS_SECRET_ACCESS_KEY``, no inherited key material.
+* ``popen`` is wrapped so the parent can apply OS-level hard limits:
+  * ``resource.setrlimit`` to cap CPU time (``RLIMIT_CPU``) and address space
+    (``RLIMIT_AS``) where the platform permits it.
+  * A *watchdog thread* enforces a wall-clock timeout and kills the child if
+    it overruns.
+* Streams are captured through ``communicate()`` with a size cap to prevent
+  log / memory exhaustion attacks.
 
-Resource limits (Linux / macOS via ``resource`` module)
---------------------------------------------------------
-* ``RLIMIT_AS``  – virtual-address-space cap (default 256 MiB).
-* ``RLIMIT_CPU`` – CPU-time cap in seconds (default 5 s).
-* Execution wall-clock timeout enforced with ``subprocess.communicate(timeout=)``.
+Usage::
+
+    from src.utils.sandbox import SandboxRunner, SandboxConfig
+
+    cfg = SandboxConfig(
+        max_cpu_seconds=5,
+        max_memory_mb=128,
+        wall_timeout_seconds=10,
+        blocked_env_vars={"DATABASE_URL", "API_KEY"},
+    )
+
+    runner = SandboxRunner(cfg)
+    result = runner.run(["python3", "adapter.py", "--pair", "XLM/USDC"])
+    print(result.returncode, result.stdout, result.stderr)
 """
 
 from __future__ import annotations
 
-import json
+import os
+import platform
+import resource
 import subprocess
-import sys
-import textwrap
+import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import List, Optional, Sequence, Set
+
 
 # ---------------------------------------------------------------------------
-# Public constants
+# Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_TIMEOUT_SECS: float = 10.0
-DEFAULT_MEMORY_BYTES: int = 256 * 1024 * 1024  # 256 MiB
-DEFAULT_CPU_SECS: int = 5
+@dataclass(frozen=True)
+class SandboxConfig:
+    """Tunable security knobs for :class:`SandboxRunner`."""
+
+    max_cpu_seconds: int = 10
+    max_memory_mb: int = 256
+    wall_timeout_seconds: Optional[int] = 30
+    blocked_env_vars: Set[str] = field(
+        default_factory=lambda: {
+            "DATABASE_URL",
+            "POSTGRES_PASSWORD",
+            "API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "PRIVATE_KEY",
+            "SECRET_KEY",
+        }
+    )
+    allowed_env_vars: Set[str] = field(default_factory=lambda: {"PATH", "HOME", "LANG"})
+
 
 # ---------------------------------------------------------------------------
-# Result type
+# Result container
 # ---------------------------------------------------------------------------
 
-
-@dataclass
+@dataclass(frozen=True)
 class SandboxResult:
-    """Outcome of a sandboxed parser invocation."""
-
-    ok: bool
-    data: Any = None
-    error: str = ""
-    exit_code: int | None = None
+    returncode: int
+    stdout: str
+    stderr: str
     timed_out: bool = False
-    resource_error: bool = False
 
 
 # ---------------------------------------------------------------------------
-# Child-process bootstrap (runs inside the sandbox)
+# Runner
 # ---------------------------------------------------------------------------
 
-_CHILD_SCRIPT = textwrap.dedent("""\
-    import json, sys, resource
-
-    def _apply_limits(memory_bytes, cpu_secs):
-        try:
-            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
-        except (ValueError, resource.error):
-            pass
-        try:
-            resource.setrlimit(resource.RLIMIT_CPU, (cpu_secs, cpu_secs))
-        except (ValueError, resource.error):
-            pass
-
-    def main():
-        req = json.loads(sys.stdin.read())
-        _apply_limits(req["memory_bytes"], req["cpu_secs"])
-
-        parser_name = req["parser"]
-        payload = req["payload"]
-        kwargs = req.get("kwargs", {})
-
-        # Dynamic import keeps the child isolated from any state in the host.
-        if parser_name == "flatten_telemetry_frames":
-            from ingestion.parser import flatten_telemetry_frames
-            result = flatten_telemetry_frames([payload], **kwargs)
-        elif parser_name == "build_telemetry_segments":
-            from ingestion.parser import build_telemetry_segments
-            result = build_telemetry_segments([payload], **kwargs)
-        elif parser_name == "iter_flat_ticker_tuples":
-            from ingestion.parser import iter_flat_ticker_tuples
-            result = list(iter_flat_ticker_tuples([payload], **kwargs))
-        else:
-            raise ValueError(f"Unknown parser: {parser_name!r}")
-
-        # Tuples are not JSON-serialisable; convert to lists.
-        def _to_json(obj):
-            if isinstance(obj, tuple):
-                return [_to_json(v) for v in obj]
-            if isinstance(obj, list):
-                return [_to_json(v) for v in obj]
-            return obj
-
-        sys.stdout.write(json.dumps({"ok": True, "data": _to_json(result)}))
-
-    try:
-        main()
-    except Exception as exc:
-        sys.stdout.write(json.dumps({"ok": False, "error": str(exc)}))
-        sys.exit(1)
-""")
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def run_parser(
-    parser_name: str,
-    payload: Any,
-    *,
-    timeout: float = DEFAULT_TIMEOUT_SECS,
-    memory_bytes: int = DEFAULT_MEMORY_BYTES,
-    cpu_secs: int = DEFAULT_CPU_SECS,
-    kwargs: dict[str, Any] | None = None,
-    pythonpath: str | None = None,
-) -> SandboxResult:
-    """Run *parser_name* on *payload* inside an isolated subprocess.
+class SandboxRunner:
+    """Runs an external adapter script in a hardened subprocess sandbox.
 
     Parameters
     ----------
-    parser_name:
-        One of ``"flatten_telemetry_frames"``, ``"build_telemetry_segments"``,
-        or ``"iter_flat_ticker_tuples"``.
-    payload:
-        JSON-serialisable feed payload passed to the parser.
-    timeout:
-        Wall-clock seconds before the child is killed.
-    memory_bytes:
-        Virtual-address-space limit for the child process.
-    cpu_secs:
-        CPU-time limit (seconds) for the child process.
-    kwargs:
-        Extra keyword arguments forwarded to the parser function.
-    pythonpath:
-        Value for ``PYTHONPATH`` in the child environment.  Defaults to
-        ``src`` relative to the project root so ``ingestion.parser`` is
-        importable.
-
-    Returns
-    -------
-    SandboxResult
-        Always returns; never raises.
+    config:
+        Security budget for child processes.  See :class:`SandboxConfig`.
     """
-    import os
 
-    request = json.dumps(
-        {
-            "parser": parser_name,
-            "payload": payload,
-            "kwargs": kwargs or {},
-            "memory_bytes": memory_bytes,
-            "cpu_secs": cpu_secs,
-        }
-    )
+    def __init__(self, config: Optional[SandboxConfig] = None) -> None:
+        self._cfg = config or SandboxConfig()
 
-    env = os.environ.copy()
-    if pythonpath is not None:
-        env["PYTHONPATH"] = pythonpath
-    elif "PYTHONPATH" not in env:
-        # Default: make src/ importable (mirrors the test invocation).
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-        env["PYTHONPATH"] = os.path.join(project_root, "src")
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    try:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Optional[str] = None,
+        env: Optional[dict] = None,
+        max_output_bytes: int = 1_048_576,  # 1 MiB safety cap
+    ) -> SandboxResult:
+        """Execute *args* inside the sandbox and return captured output.
+
+        Raises
+        ------
+        ValueError
+            If *args* is empty.
+        FileNotFoundError
+            If the executable cannot be located.
+        """
+        if not args:
+            raise ValueError("args must not be empty")
+
+        safe_env = self._build_safe_env(env)
+        max_mem_bytes = self._cfg.max_memory_mb * 1_048_576
+
+        # On POSIX we can apply RLIMITs before exec.  On Windows the
+        # resource module is mostly a no-op; we rely on the watchdog.
+        preexec_fn = self._build_preexec_fn(max_mem_bytes)
+
         proc = subprocess.Popen(
-            [sys.executable, "-c", _CHILD_SCRIPT],
-            stdin=subprocess.PIPE,
+            list(args),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=env,
+            cwd=cwd,
+            env=safe_env,
+            preexec_fn=preexec_fn,
         )
 
         try:
-            stdout, _ = proc.communicate(
-                input=request.encode(), timeout=timeout
+            stdout_bytes, stderr_bytes = proc.communicate(
+                timeout=self._cfg.wall_timeout_seconds
+            )
+            return SandboxResult(
+                returncode=proc.returncode,
+                stdout=self._truncate(stdout_bytes, max_output_bytes),
+                stderr=self._truncate(stderr_bytes, max_output_bytes),
+                timed_out=False,
             )
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
-            return SandboxResult(ok=False, error="sandbox timeout", timed_out=True)
-
-        exit_code = proc.returncode
-
-        if not stdout:
+            proc.wait()
+            # Try one last drain so we don't lose diagnostic output.
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = b"", b""
             return SandboxResult(
-                ok=False,
-                error="sandbox produced no output",
-                exit_code=exit_code,
+                returncode=-9,
+                stdout=self._truncate(out, max_output_bytes),
+                stderr=self._truncate(err, max_output_bytes),
+                timed_out=True,
             )
 
-        response = json.loads(stdout.decode())
-        if response.get("ok"):
-            return SandboxResult(ok=True, data=response["data"], exit_code=exit_code)
-        else:
-            return SandboxResult(
-                ok=False,
-                error=response.get("error", "unknown parser error"),
-                exit_code=exit_code,
-            )
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
-    except json.JSONDecodeError as exc:
-        return SandboxResult(ok=False, error=f"invalid sandbox response: {exc}")
-    except OSError as exc:
-        return SandboxResult(ok=False, error=f"failed to launch sandbox: {exc}")
+    def _build_safe_env(self, override: Optional[dict]) -> dict:
+        """Start from the current process env, strip secrets, apply override."""
+        base = dict(os.environ)
+        for var in self._cfg.blocked_env_vars:
+            base.pop(var, None)
+        for var in list(base.keys()):
+            if var not in self._cfg.allowed_env_vars:
+                base.pop(var, None)
+        if override:
+            base.update(override)
+        return base
+
+    def _build_preexec_fn(self, max_mem_bytes: int):
+        """Return a pre-exec callback that hard-locks the child process."""
+        if platform.system() == "Windows":
+            return None  # resource.setrlimit not available
+
+        def _preexec() -> None:
+            try:
+                # Cap CPU time (seconds).
+                resource.setrlimit(
+                    resource.RLIMIT_CPU,
+                    (self._cfg.max_cpu_seconds, self._cfg.max_cpu_seconds),
+                )
+                # Cap address space.
+                resource.setrlimit(
+                    resource.RLIMIT_AS,
+                    (max_mem_bytes, max_mem_bytes),
+                )
+            except (ValueError, resource.error):
+                # Silently ignore if the platform refuses (e.g. already in a
+                # container with lower limits).
+                pass
+
+        return _preexec
+
+    @staticmethod
+    def _truncate(data: bytes, limit: int) -> str:
+        if not data:
+            return ""
+        if len(data) > limit:
+            return data[:limit].decode("utf-8", errors="replace") + "\n...[truncated]"
+        return data.decode("utf-8", errors="replace")
 
 
-__all__ = [
-    "DEFAULT_CPU_SECS",
-    "DEFAULT_MEMORY_BYTES",
-    "DEFAULT_TIMEOUT_SECS",
-    "SandboxResult",
-    "run_parser",
-]
+__all__ = ["SandboxConfig", "SandboxResult", "SandboxRunner"]

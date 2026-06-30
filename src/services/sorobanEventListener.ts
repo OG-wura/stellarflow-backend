@@ -82,18 +82,12 @@ export class SorobanEventListener {
     this.startPollingTimer();
   }
 
-  restart(newIntervalMs: number): void {
-    this.pollIntervalMs = newIntervalMs;
-
-    if (!this.isRunning) {
-      return;
-    }
-
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-    }
-
-    this.startPollingTimer();
+  restart(pollIntervalMs?: number): void {
+    this.stop();
+    if (pollIntervalMs !== undefined) this.pollIntervalMs = pollIntervalMs;
+    this.start().catch((err) =>
+      logger.error("[EventListener] Restart failed:", err),
+    );
   }
 
   private startPollingTimer(): void {
@@ -234,14 +228,6 @@ export class SorobanEventListener {
     this.pollTimer = null;
     this.isRunning = false;
     logger.info("[EventListener] Stopped");
-  }
-
-  restart(pollIntervalMs?: number): void {
-    this.stop();
-    if (pollIntervalMs !== undefined) this.pollIntervalMs = pollIntervalMs;
-    this.start().catch((err) =>
-      logger.error("[EventListener] Restart failed:", err),
-    );
   }
 
   isActive(): boolean {
