@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://user:pass@localhost:5432/stellarflow
+      STELLAR_SECRET: SDON4BI7DPYRITW7QBJMJ6KOESXAVIYPUXBDDTIEDDN4TTN6YHQTF7QA
+      SIGNER_BACKEND: local
     steps:
       - uses: actions/checkout@v4
 
