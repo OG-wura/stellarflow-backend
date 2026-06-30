@@ -85,7 +85,7 @@ type PriorityAlertDetails = {
   zScore: number;
   mean: number;
   stdDev: number;
-  timestamp: Date;
+  timestamp: Date | number;
 };
 
 export class WebhookService {
@@ -320,59 +320,6 @@ export class WebhookService {
     };
   }
 
-  private formatPriorityAlert(alertDetails: PriorityAlertDetails): WebhookPayload {
-    const { currency, rate, zScore, mean, stdDev, timestamp } = alertDetails;
-
-    if (this.platform === "discord") {
-      return {
-        embeds: [
-          {
-            title: "⚠️ High Priority Market Anomaly Detected",
-            color: 0xff6b00,
-            fields: [
-              { name: "Currency", value: currency, inline: true },
-              { name: "Rate", value: rate.toString(), inline: true },
-              { name: "Z-Score", value: zScore.toFixed(2), inline: true },
-              { name: "Mean", value: mean.toString(), inline: true },
-              { name: "Std Dev", value: stdDev.toString(), inline: true },
-              { name: "Time", value: timestamp.toISOString() },
-            ],
-          },
-        ],
-      };
-    }
-
-    return {
-      blocks: [
-        {
-          type: "header",
-          text: { type: "plain_text", text: "⚠️ High Priority Market Anomaly Detected" },
-        },
-        {
-          type: "section",
-          fields: [
-            { type: "mrkdwn", text: `*Currency:*
-${currency}` },
-            { type: "mrkdwn", text: `*Rate:*
-${rate}` },
-            { type: "mrkdwn", text: `*Z-Score:*
-${zScore.toFixed(2)}` },
-            { type: "mrkdwn", text: `*Mean:*
-${mean}` },
-            { type: "mrkdwn", text: `*Std Dev:*
-${stdDev}` },
-          ],
-        },
-        {
-          type: "context",
-          elements: [
-            { type: "mrkdwn", text: `Detected at ${timestamp.toISOString()}` },
-          ],
-        },
-      ],
-    };
-  }
-
   // FIX 1: Added Slack branch — previously always returned a Discord embed,
   // which would be silently dropped or mangled when NOTIFICATION_PLATFORM=slack.
   private formatGasBalanceAlert(
@@ -550,6 +497,60 @@ ${stdDev}` },
           type: "context",
           elements: [
             { type: "mrkdwn", text: `Detected at ${timestamp.toISOString()}` },
+          ],
+        },
+      ],
+    };
+  }
+
+  private formatPriorityAlert(
+    alertDetails: PriorityAlertDetails,
+  ): WebhookPayload {
+    const { currency, rate, zScore, mean, stdDev, timestamp } = alertDetails;
+    const detectedAt =
+      timestamp instanceof Date ? timestamp : new Date(timestamp);
+
+    if (this.platform === "discord") {
+      return {
+        embeds: [
+          {
+            title: "Priority Price Anomaly Alert",
+            color: 0xff6600,
+            fields: [
+              { name: "Currency", value: currency, inline: true },
+              { name: "Rate", value: rate.toString(), inline: true },
+              { name: "Z-Score", value: zScore.toFixed(2), inline: true },
+              { name: "Mean", value: mean.toFixed(4), inline: true },
+              { name: "Std Dev", value: stdDev.toFixed(4), inline: true },
+              {
+                name: "Time",
+                value: detectedAt.toISOString(),
+                inline: true,
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    return {
+      blocks: [
+        {
+          type: "header",
+          text: { type: "plain_text", text: "Priority Price Anomaly Alert" },
+        },
+        {
+          type: "section",
+          fields: [
+            { type: "mrkdwn", text: `*Currency:*\n${currency}` },
+            { type: "mrkdwn", text: `*Rate:*\n${rate}` },
+            { type: "mrkdwn", text: `*Z-Score:*\n${zScore.toFixed(2)}` },
+            { type: "mrkdwn", text: `*Mean:*\n${mean.toFixed(4)}` },
+            { type: "mrkdwn", text: `*Std Dev:*\n${stdDev.toFixed(4)}` },
+            {
+              type: "mrkdwn",
+              text: `*Time:*\n${detectedAt.toISOString()}`,
+            },
           ],
         },
       ],

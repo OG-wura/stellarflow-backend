@@ -208,7 +208,7 @@ export async function getRelayerLatencyStats(relayerName: string) {
 
   // Calculate average latency of violations
   const avgLatency = recentViolations.length > 0
-    ? recentViolations.reduce((sum, v) => sum + (v.latencyDiffMs || 0), 0) / recentViolations.length
+    ? recentViolations.reduce((sum: number, v: { latencyDiffMs: number | null }) => sum + (v.latencyDiffMs || 0), 0) / recentViolations.length
     : 0;
 
   return {

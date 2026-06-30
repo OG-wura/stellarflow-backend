@@ -205,7 +205,7 @@ export async function getOhlcCandles(
     // ------------------------------------------------------------------
     // 3. Serialise (Decimal → string for wire safety)
     // ------------------------------------------------------------------
-    const serialised = candles.map((c) => ({
+    const serialised = candles.map((c: any) => ({
       openTime: c.openTime.toISOString(),
       closeTime: c.closeTime.toISOString(),
       open: c.open.toString(),
