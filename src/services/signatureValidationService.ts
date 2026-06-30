@@ -156,7 +156,7 @@ export class SignatureValidationService {
       return { valid: false, canExecute: false, message: "Invalid signature" };
     }
 
-    const updatedConsensus = await prisma.$transaction(async (tx) => {
+    const updatedConsensus = await prisma.$transaction(async (tx: any) => {
       await tx.pendingSignature.create({
         data: {
           pendingConsensusId: consensusId,

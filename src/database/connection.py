@@ -60,8 +60,13 @@ Usage::
 
 import logging
 import threading
-from typing import Any, Deque, Optional
+from typing import Any, Callable, Deque, Optional, Tuple, Type
 from collections import deque
+
+try:  # psycopg2 is optional: the module must import under sqlite/test setups too.
+    import psycopg2
+except ImportError:  # pragma: no cover - exercised only where psycopg2 is absent
+    psycopg2 = None
 
 logger = logging.getLogger(__name__)
  
@@ -74,6 +79,20 @@ logger = logging.getLogger(__name__)
 # warm with comfortable margin.
 DEFAULT_PING_INTERVAL: float = 30.0
 HEARTBEAT_QUERY: str = "SELECT 1;"
+
+# ---------------------------------------------------------------------------
+# ConnectionPoolHealthMonitor constants
+# ---------------------------------------------------------------------------
+
+# How often the background loop validates a pooled connection. Shorter than the
+# keep-alive cadence so a stale socket left by a DB restart is caught and the
+# pool rebuilt before too many write attempts hit the dead connection.
+DEFAULT_HEALTH_CHECK_INTERVAL: float = 15.0
+
+# Number of consecutive failed probes that escalate from discarding individual
+# connections to rebuilding the whole pool. A single blip discards one socket;
+# a true outage (every pooled socket dead after a restart) trips the rebuild.
+DEFAULT_FAILURE_THRESHOLD: int = 2
 
 # ---------------------------------------------------------------------------
 # AdaptiveTimeoutController constants
@@ -195,7 +214,263 @@ class ConnectionKeepAlive:
             thread.join(timeout=timeout)
         self._thread = None
         logger.info("ConnectionKeepAlive stopped")
- 
+
+
+def _default_broken_exceptions() -> Tuple[Type[BaseException], ...]:
+    """Exception types that signal a stale / dead pooled socket.
+
+    ``OSError`` is always included (it is the base of the stdlib ``socket.error``
+    and covers raw connection-reset / broken-pipe failures). When ``psycopg2``
+    is importable its ``OperationalError`` (server gone, connection closed) and
+    ``InterfaceError`` (connection already closed by the client) are added — the
+    two driver errors raised when a pooled connection's socket has died.
+    """
+    exceptions: Tuple[Type[BaseException], ...] = (OSError,)
+    if psycopg2 is not None:
+        exceptions = exceptions + (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        )
+    return exceptions
+
+
+class ConnectionPoolHealthMonitor:
+    """Validates pooled connections and rebuilds broken paths automatically.
+
+    A sudden database restart or a transient network drop leaves a connection
+    pool holding connections whose underlying TCP socket is dead. The next write
+    that checks one of those connections out fails with a stale-socket error,
+    and keeps failing until the process is restarted. This monitor closes that
+    gap *without* a restart:
+
+    1. **Probe** — every ``interval`` seconds (or on demand via
+       :meth:`check_health`) it checks a connection out of the pool, runs a
+       lightweight ``validation_query`` (``SELECT 1;``) and returns it.
+    2. **Discard** — if the probe raises a stale-socket exception the connection
+       is handed back with ``close=True`` so the pool drops the dead socket and
+       lazily opens a fresh one on the next ``getconn``.
+    3. **Rebuild** — after ``failure_threshold`` *consecutive* failed probes the
+       monitor assumes the whole pool is poisoned (the common case after a full
+       engine restart), calls ``pool_factory`` to build a replacement, swaps it
+       in atomically and closes the old pool. A subsequent healthy probe resets
+       the counter.
+
+    The monitor is pool-agnostic: ``pool`` need only expose ``getconn()`` /
+    ``putconn(conn)`` and, for the rebuild path, ``closeall()`` — the interface
+    of :class:`psycopg2.pool.ThreadedConnectionPool` used by
+    :class:`database.hub.ConnectionHub`. ``putconn(conn, close=True)`` is used
+    when supported and degrades to a plain ``putconn(conn)`` otherwise.
+
+    Because the pool reference is swapped on recovery, callers that want to keep
+    acquiring from the healed pool should read it back through the :attr:`pool`
+    property rather than caching the original object.
+
+    The background thread mirrors :class:`ConnectionKeepAlive`: a daemon thread
+    driven by a :class:`threading.Event`, so ``stop()`` is prompt and a double
+    ``start()`` is a no-op.
+    """
+
+    def __init__(
+        self,
+        pool: Any,
+        pool_factory: Callable[[], Any],
+        interval: float = DEFAULT_HEALTH_CHECK_INTERVAL,
+        validation_query: str = HEARTBEAT_QUERY,
+        failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
+        broken_exceptions: Optional[Tuple[Type[BaseException], ...]] = None,
+    ) -> None:
+        if pool is None:
+            raise ValueError("pool must not be None")
+        if pool_factory is None or not callable(pool_factory):
+            raise ValueError("pool_factory must be a callable returning a pool")
+        if interval <= 0:
+            raise ValueError("interval must be a positive number of seconds")
+        if failure_threshold < 1:
+            raise ValueError("failure_threshold must be at least 1")
+
+        self._pool = pool
+        self._pool_factory = pool_factory
+        self._interval = interval
+        self._query = validation_query
+        self._failure_threshold = failure_threshold
+        self._broken = broken_exceptions or _default_broken_exceptions()
+
+        self._consecutive_failures = 0
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def pool(self) -> Any:
+        """The current live pool — the rebuilt one after any recovery swap."""
+        with self._lock:
+            return self._pool
+
+    @property
+    def is_running(self) -> bool:
+        """True while the background health-check thread is alive."""
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def consecutive_failures(self) -> int:
+        """Number of consecutive failed probes since the last healthy one."""
+        with self._lock:
+            return self._consecutive_failures
+
+    def start(self) -> None:
+        """Start the background health-check loop.
+
+        Calling ``start`` on an already-running monitor is a no-op.
+        """
+        if self.is_running:
+            logger.debug("ConnectionPoolHealthMonitor already running; start() ignored")
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="ConnectionPoolHealthMonitor",
+        )
+        self._thread.start()
+        logger.info(
+            "ConnectionPoolHealthMonitor started; validating every %.1f seconds "
+            "(rebuild after %d consecutive failures)",
+            self._interval,
+            self._failure_threshold,
+        )
+
+    def check_health(self) -> bool:
+        """Run a single probe / discard / rebuild cycle.
+
+        Returns ``True`` if the pool is healthy — either the probe succeeded or
+        a rebuild produced a working pool — and ``False`` if the probe failed
+        and the failure count has not yet reached the rebuild threshold.
+
+        Never raises: any exception from the probe is classified and handled so
+        the background loop can survive an indefinite outage and keep retrying.
+        """
+        pool = self.pool
+        conn = None
+        try:
+            conn = pool.getconn()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(self._query)
+                cursor.fetchone()
+            finally:
+                close = getattr(cursor, "close", None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            stale = isinstance(exc, self._broken)
+            self._return_broken(pool, conn)
+            return self._on_failure(exc, stale)
+
+        # Healthy probe: return the connection and reset the failure streak.
+        self._return_healthy(pool, conn)
+        with self._lock:
+            self._consecutive_failures = 0
+        logger.debug("Pool health probe succeeded")
+        return True
+
+    def recover(self) -> bool:
+        """Rebuild the pool via ``pool_factory`` and swap it in atomically.
+
+        The old pool is closed (best-effort ``closeall()``) after the swap so
+        in-flight callers holding the old reference are not yanked mid-query.
+        Returns ``True`` on a successful rebuild, ``False`` if the factory
+        raised (the existing pool is kept so the next tick can retry).
+        """
+        try:
+            new_pool = self._pool_factory()
+        except Exception:
+            logger.exception("Pool rebuild failed; keeping existing pool for retry")
+            return False
+
+        with self._lock:
+            old_pool = self._pool
+            self._pool = new_pool
+            self._consecutive_failures = 0
+
+        if old_pool is not None and old_pool is not new_pool:
+            closeall = getattr(old_pool, "closeall", None)
+            if callable(closeall):
+                try:
+                    closeall()
+                except Exception:
+                    logger.warning("Error closing the old pool after rebuild", exc_info=True)
+        logger.info("ConnectionPoolHealthMonitor rebuilt the connection pool")
+        return True
+
+    def stop(self, timeout: Optional[float] = 5.0) -> None:
+        """Signal the background thread to stop and wait for it to exit."""
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+        self._thread = None
+        logger.info("ConnectionPoolHealthMonitor stopped")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _run(self) -> None:
+        """Background worker loop; ticks once per interval, exits promptly on stop."""
+        while not self._stop_event.wait(self._interval):
+            self.check_health()
+
+    def _on_failure(self, exc: BaseException, stale: bool) -> bool:
+        """Record a failed probe and escalate to a rebuild past the threshold."""
+        with self._lock:
+            self._consecutive_failures += 1
+            failures = self._consecutive_failures
+        if stale:
+            logger.warning(
+                "Pool health probe hit a stale-socket error (%d/%d): %s",
+                failures,
+                self._failure_threshold,
+                exc,
+            )
+        else:
+            logger.warning(
+                "Pool health probe failed (%d/%d)",
+                failures,
+                self._failure_threshold,
+                exc_info=True,
+            )
+        if failures >= self._failure_threshold:
+            return self.recover()
+        return False
+
+    def _return_healthy(self, pool: Any, conn: Any) -> None:
+        """Return a validated connection to the pool, swallowing return errors."""
+        if conn is None:
+            return
+        try:
+            pool.putconn(conn)
+        except Exception:
+            logger.warning("Failed to return a healthy connection to the pool", exc_info=True)
+
+    def _return_broken(self, pool: Any, conn: Any) -> None:
+        """Discard a broken connection so the pool drops its dead socket.
+
+        Prefers ``putconn(conn, close=True)`` (psycopg2 pools) so the pool opens
+        a fresh connection next time; falls back to a plain ``putconn`` for pools
+        that do not accept the keyword.
+        """
+        if conn is None:
+            return
+        try:
+            pool.putconn(conn, close=True)
+        except TypeError:
+            # Pool's putconn does not support the close kwarg.
+            try:
+                pool.putconn(conn)
+            except Exception:
+                logger.warning("Failed to discard a broken connection", exc_info=True)
+        except Exception:
+            logger.warning("Failed to discard a broken connection", exc_info=True)
 
 
 class AdaptiveTimeoutController:

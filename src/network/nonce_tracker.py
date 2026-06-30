@@ -1,21 +1,51 @@
+import asyncio
 import logging
+import os
 import threading
-from typing import Dict, Optional
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+import aiohttp
+import requests
+
+# Default time a nonce may sit "pending" (issued, but neither confirmed nor
+# failed) before it is reported as stale. Tunable per call via
+# get_stale(address, timeout_seconds=...).
+DEFAULT_STALE_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass
+class _PendingNonce:
+    """Bookkeeping for a nonce that has been issued but not yet resolved."""
+
+    nonce: int
+    issued_at: float = field(default_factory=time.monotonic)
 
 
 class NonceTracker:
-    """Thread-safe per-account nonce tracker for parallel transaction channels.
+    """Thread-safe per-account nonce tracker with pending-slot recovery.
 
-    Each account address owns an independent Lock, so concurrent transactions
+    This preserves the original strictly-sequential, one-nonce-at-a-time
+    contract used by the rest of the transport layer (see tx_manager.py,
+    which signs and dispatches under a single per-account lock). What's new
+    is visibility into nonces that were handed out but never confirmed or
+    failed -- e.g. because the broadcast dropped or the response was lost --
+    so callers can detect and recover from those gaps instead of silently
+    trusting that every issued nonce eventually landed.
+
+    Each account address owns an independent Lock, so concurrent operations
     across different accounts proceed without contention while a single
     account's nonces remain strictly sequential and duplicate-free.
 
     Complexity
     ----------
-    Time  : O(1) amortised per nonce acquisition, sync, or invalidation.
-    Space : O(n) where n is the number of unique account addresses tracked.
+    Time  : O(1) amortised per acquisition, confirmation, failure, or sync.
+            O(p) for get_stale, where p is the number of currently pending
+            nonces for that account (normally small/bounded by in-flight tx
+            count, not a long-term backlog).
+    Space : O(n + p) where n is the number of unique account addresses
+            tracked and p is the number of currently pending nonces.
     """
 
     _instance: Optional["NonceTracker"] = None
@@ -30,10 +60,32 @@ class NonceTracker:
                     instance = super().__new__(cls)
                     instance._account_locks: Dict[str, threading.Lock] = {}
                     instance._nonces: Dict[str, int] = {}
+                    # address -> {nonce: _PendingNonce}
+                    instance._pending: Dict[str, Dict[int, _PendingNonce]] = {}
                     # Protects _account_locks dict during lazy lock creation.
                     instance._map_lock = threading.Lock()
                     cls._instance = instance
         return cls._instance
+
+    @classmethod
+    def create_standalone(cls) -> "NonceTracker":
+        """Build an independent NonceTracker instance, bypassing the singleton.
+
+        NonceTracker() always returns the shared, process-wide singleton --
+        that's intentional for production code, where every caller for a
+        given account should see the same state. This method exists for
+        callers that need an isolated instance instead, e.g. tests that
+        construct multiple TxManager objects and expect each to start with
+        a clean slate, or any code intentionally tracking a separate,
+        unshared set of accounts.
+        """
+
+        instance = object.__new__(cls)
+        instance._account_locks = {}
+        instance._nonces = {}
+        instance._pending = {}
+        instance._map_lock = threading.Lock()
+        return instance
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -66,6 +118,9 @@ class NonceTracker:
         sequence number) must be supplied. Subsequent calls increment the
         cached value atomically without further network I/O.
 
+        The returned nonce is recorded as pending until confirm() or fail()
+        is called for it, or until it is reported stale via get_stale().
+
         Args:
             address: Account identifier (e.g. a Stellar public key).
             seed:    Bootstrap nonce when no local cache exists. Required on
@@ -88,11 +143,13 @@ class NonceTracker:
                             f"No cached nonce for '{address}' and no seed supplied."
                         )
                     self._nonces[address] = seed
+                    self._mark_pending(address, seed)
                     logger.info("[NonceTracker] Seeded nonce for %s → %d", address, seed)
                     return seed
 
                 next_nonce = cached + 1
                 self._nonces[address] = next_nonce
+                self._mark_pending(address, next_nonce)
                 return next_nonce
             except Exception:
                 # Drop the cache on any error so the next caller is forced to
@@ -100,23 +157,114 @@ class NonceTracker:
                 self._nonces.pop(address, None)
                 raise
 
+    def confirm(self, address: str, nonce: int) -> None:
+        """Mark *nonce* as confirmed (landed on the ledger) and stop tracking it.
+
+        Call this once the caller learns -- via polling, webhook, or any other
+        feedback channel -- that the transaction using this nonce succeeded.
+
+        Time: O(1).
+        """
+        lock = self._get_lock(address)
+        with lock:
+            pending = self._pending.get(address)
+            if pending is not None:
+                pending.pop(nonce, None)
+        logger.info("[NonceTracker] Confirmed nonce %d for %s", nonce, address)
+
+    def fail(self, address: str, nonce: int) -> None:
+        """Mark *nonce* as failed (rejected or dropped) and stop tracking it.
+
+        This does not by itself roll back the cached counter -- if the chain
+        ends up with a gap at this sequence, call sync_nonce() once the
+        correct ledger sequence is known. This method only clears the
+        pending-slot bookkeeping so the nonce stops being reported as stale.
+
+        Time: O(1).
+        """
+        lock = self._get_lock(address)
+        with lock:
+            pending = self._pending.get(address)
+            if pending is not None:
+                pending.pop(nonce, None)
+        logger.info("[NonceTracker] Failed nonce %d for %s", nonce, address)
+
+    def get_stale(
+        self, address: str, timeout_seconds: float = DEFAULT_STALE_TIMEOUT_SECONDS
+    ) -> List[int]:
+        """Return pending nonces for *address* older than *timeout_seconds*.
+
+        A nonce counts as stale if it was issued by get_next_nonce() but has
+        not since been resolved via confirm() or fail(), and more than
+        timeout_seconds have elapsed. Use this to detect transactions that
+        likely dropped or whose outcome was never reported back, so they can
+        be investigated, retried, or used to trigger a sync_nonce() call.
+
+        Time: O(p), where p is the number of currently pending nonces for
+        this account.
+        """
+        lock = self._get_lock(address)
+        with lock:
+            pending = self._pending.get(address)
+            if not pending:
+                return []
+            now = time.monotonic()
+            stale = [
+                nonce
+                for nonce, info in pending.items()
+                if (now - info.issued_at) > timeout_seconds
+            ]
+        return sorted(stale)
+
     def sync_nonce(self, address: str, nonce: int) -> None:
         """Overwrite the cached nonce with a known-good ledger value.
         
         Call this after a tx_bad_seq error to realign the local counter with
-        the chain's authoritative sequence number.
-        
+        the chain's authoritative sequence number. This also clears all
+        pending-slot bookkeeping for the account, since any in-flight nonces
+        are now superseded by the authoritative value.
+
         Time: O(1).
         """
         lock = self._get_lock(address)
         with lock:
             self._nonces[address] = nonce
+            self._pending.pop(address, None)
             logger.info("[NonceTracker] Synced nonce for %s → %d", address, nonce)
 
-    def get_nonce(self, address: str) -> Optional[int]:
-        """Return the current cached nonce for *address*, if it exists.
+    async def _probe_node_health(self, session: aiohttp.ClientSession, node: HorizonNodeProfile) -> None:
+        """
+        Dispatches lightweight low-overhead endpoint probes to track real-time communication shifts.
+        """
+        # Horizon base path used for lightweight connection checks
+        probe_url = f"{node.url.rstrip('/')}/"
+        start_time = time.monotonic()
         
-        Time: O(1).
+        try:
+            async with asyncio.timeout(LIGHTWEIGHT_PING_TIMEOUT):
+                async with session.get(probe_url) as response:
+                    if response.status == 200:
+                        latency_ms = (time.monotonic() - start_time) * 1000
+                        node.record_metric(latency_ms)
+                        
+                        # Mark degraded if moving average indicates systematic latency decline
+                        if node.moving_average_latency > (LIGHTWEIGHT_PING_TIMEOUT * 1000):
+                            if node.is_healthy:
+                                logger.warning(f"Predictive Warning: Performance degradation detected on {node.name}. Latency: {node.moving_average_latency:.1f}ms")
+                            node.is_healthy = False
+                        else:
+                            node.is_healthy = True
+                        return
+
+                    node.is_healthy = False
+                    logger.debug(f"Node {node.name} returned non-200 footprint status: {response.status}")
+                    
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            node.is_healthy = False
+            node.record_metric(LIGHTWEIGHT_PING_TIMEOUT * 1000 * 2) # Penalize metric tracking log
+            logger.warn(f"Predictive Supervisor flagged node [{node.name}] as UNHEALTHY (Timeout/Network breakdown)")
+
+    def _evaluate_routing_topology(self) -> None:
         """
         lock = self._get_lock(address)
         with lock:
@@ -126,7 +274,8 @@ class NonceTracker:
         """Evict the cached nonce for *address*, or all accounts when omitted.
 
         The next call to get_next_nonce will require a seed or an external
-        sync from the ledger.
+        sync from the ledger. Also clears any pending-slot bookkeeping for
+        the affected account(s).
 
         Implementation note: for a full clear, a snapshot of existing accounts
         is taken under _map_lock which is then released before acquiring
@@ -140,6 +289,7 @@ class NonceTracker:
             lock = self._get_lock(address)
             with lock:
                 self._nonces.pop(address, None)
+                self._pending.pop(address, None)
             logger.info(
                 "[NonceTracker] Nonce invalidated for %s. Re-sync required.", address
             )
@@ -152,267 +302,15 @@ class NonceTracker:
         for addr, lock in snapshot:
             with lock:
                 self._nonces.pop(addr, None)
+                self._pending.pop(addr, None)
 
         logger.info("[NonceTracker] All cached nonces cleared. Re-sync required.")
+
+    def _mark_pending(self, address: str, nonce: int) -> None:
+        """Record *nonce* as freshly issued and unresolved. Caller holds the lock."""
+        account_pending = self._pending.setdefault(address, {})
+        account_pending[nonce] = _PendingNonce(nonce=nonce)
 
 
 # Module-level singleton – import and use directly.
 nonce_tracker = NonceTracker()
-
-
-# ---------------------------------------------------------------------------
-# Sliding-window sequence tracker
-# ---------------------------------------------------------------------------
-
-
-class _AccountWindow:
-    """Per-account mutable state for NonceWindow."""
-
-    __slots__ = ("lock", "base", "next_index", "pending")
-
-    def __init__(self) -> None:
-        self.lock: threading.Lock = threading.Lock()
-        self.base: Optional[int] = None
-        self.next_index: int = 0
-        self.pending: set = set()
-
-
-class NonceWindow:
-    """Thread-safe sliding window of pre-allocated Stellar sequence numbers.
-
-    Unlike a simple sequential counter, ``NonceWindow`` pre-allocates
-    *window_size* consecutive sequence numbers per account upfront.  Each
-    ``acquire()`` call returns a unique slot from the current batch with only
-    a brief critical section (a counter increment), so multiple parallel
-    broadcast workers obtain their sequences almost simultaneously and can
-    then sign and dispatch concurrently without serialising on the tracking
-    layer.
-
-    Sliding behaviour
-    -----------------
-    The window covers the integer range ``[base, base + window_size)``.
-    ``acquire()`` hands out slots in order; ``acknowledge()`` marks a slot as
-    finished.  Whenever the *lowest* in-flight sequence is acknowledged the
-    base advances past every contiguous run of completed leading slots,
-    opening fresh capacity for new ``acquire()`` calls.
-
-    Example with window_size=4 and seed=100
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    acquire() → 100   pending={100}        slots used: 1/4
-    acquire() → 101   pending={100,101}    slots used: 2/4
-    acquire() → 102   pending={100,101,102} slots used: 3/4
-    acknowledge(101)  pending={100,102}    base stays at 100 (100 still live)
-    acknowledge(100)  pending={102}        base slides to 102 (101 already done)
-    acquire() → 103   pending={102,103}    slots used: 2/4  (one slot re-opened)
-
-    Complexity
-    ----------
-    acquire     : O(1) – lock held for a counter increment only.
-    acknowledge : O(W) worst-case (reverse-order completions); O(1) typical.
-    Space       : O(W × A) where W = window_size and A = number of accounts.
-    """
-
-    DEFAULT_WINDOW_SIZE: int = 16
-
-    def __init__(self, window_size: int = DEFAULT_WINDOW_SIZE) -> None:
-        if window_size < 1:
-            raise ValueError("window_size must be a positive integer.")
-        self._window_size = window_size
-        self._accounts: Dict[str, _AccountWindow] = {}
-        self._map_lock = threading.Lock()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _get_account(self, address: str) -> _AccountWindow:
-        acct = self._accounts.get(address)
-        if acct is None:
-            with self._map_lock:
-                acct = self._accounts.get(address)
-                if acct is None:
-                    acct = _AccountWindow()
-                    self._accounts[address] = acct
-        return acct
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def acquire(self, address: str, seed: Optional[int] = None) -> int:
-        """Return the next pre-allocated sequence number for *address*.
-
-        The call is O(1) and holds the per-account lock only for a counter
-        increment, so concurrent workers on the same account contend for
-        nanoseconds rather than the full sign-and-dispatch duration.
-
-        Args:
-            address : Stellar account public key.
-            seed    : On-chain sequence number; required on the first call
-                      for each account (ignored once the window is seeded).
-
-        Returns:
-            A unique sequence integer that will not repeat for *address*
-            while any prior sequences for that account are still pending.
-
-        Raises:
-            ValueError  : Window is unseeded and no *seed* was supplied.
-            RuntimeError: All window slots are in-flight; call
-                          ``acknowledge()`` to release completed sequences
-                          before acquiring more.
-        """
-        acct = self._get_account(address)
-        with acct.lock:
-            if acct.base is None:
-                if seed is None:
-                    raise ValueError(
-                        f"NonceWindow for '{address}' is unseeded; supply a seed."
-                    )
-                acct.base = int(seed)
-                acct.next_index = 0
-                acct.pending.clear()
-                logger.info(
-                    "[NonceWindow] Seeded window for %s → %d (size=%d)",
-                    address,
-                    acct.base,
-                    self._window_size,
-                )
-
-            if acct.next_index >= self._window_size:
-                raise RuntimeError(
-                    f"NonceWindow for '{address}' is exhausted: all "
-                    f"{self._window_size} slots are in-flight. "
-                    "Call acknowledge() to release completed sequences."
-                )
-
-            seq = acct.base + acct.next_index
-            acct.next_index += 1
-            acct.pending.add(seq)
-
-            logger.debug(
-                "[NonceWindow] Issued seq %d for %s (slot %d/%d)",
-                seq,
-                address,
-                acct.next_index,
-                self._window_size,
-            )
-            return seq
-
-    def acknowledge(self, address: str, sequence: int) -> None:
-        """Mark *sequence* as complete and advance the window base if possible.
-
-        After removing the sequence from the pending set the method slides
-        the window base forward past every contiguous run of leading
-        acknowledged slots, opening capacity for fresh ``acquire()`` calls.
-
-        Args:
-            address  : Stellar account public key.
-            sequence : Sequence number returned by a prior ``acquire()`` call.
-        """
-        acct = self._get_account(address)
-        with acct.lock:
-            if sequence not in acct.pending:
-                logger.warning(
-                    "[NonceWindow] acknowledge(%s, %d) – sequence not tracked; "
-                    "ignoring.",
-                    address,
-                    sequence,
-                )
-                return
-
-            acct.pending.discard(sequence)
-
-            # Advance the base past every leading slot that has been both
-            # issued (next_index > 0 guarantees base was issued) and
-            # acknowledged (base is absent from pending).
-            while acct.next_index > 0 and acct.base not in acct.pending:
-                acct.base += 1
-                acct.next_index -= 1
-                logger.debug(
-                    "[NonceWindow] Window slid for %s → base=%d in-flight=%d",
-                    address,
-                    acct.base,
-                    acct.next_index,
-                )
-
-    def sync(self, address: str, sequence: int) -> None:
-        """Realign the window to a known-good on-chain sequence.
-
-        Drops all pending in-flight slots and resets the base to *sequence*.
-        Use this after a ``tx_bad_seq`` error to resynchronise local tracking
-        with the ledger's authoritative value.
-
-        Args:
-            address  : Stellar account public key.
-            sequence : Authoritative sequence number from the ledger.
-        """
-        acct = self._get_account(address)
-        with acct.lock:
-            acct.base = int(sequence)
-            acct.next_index = 0
-            acct.pending.clear()
-            logger.info(
-                "[NonceWindow] Synced window for %s → %d", address, sequence
-            )
-
-    def invalidate(self, address: Optional[str] = None) -> None:
-        """Evict the window for *address*, or all windows when omitted.
-
-        The next ``acquire()`` will require a seed.
-
-        Implementation note: for a full clear a snapshot of existing accounts
-        is taken under ``_map_lock``, which is released before acquiring
-        individual per-account locks to prevent the same deadlock risk
-        described in ``NonceTracker.invalidate``.
-
-        Time: O(1) for a single address; O(A) for a full clear.
-        """
-        if address is not None:
-            acct = self._get_account(address)
-            with acct.lock:
-                acct.base = None
-                acct.next_index = 0
-                acct.pending.clear()
-            logger.info(
-                "[NonceWindow] Invalidated window for %s. Re-seed required.",
-                address,
-            )
-            return
-
-        with self._map_lock:
-            snapshot = list(self._accounts.items())
-
-        for _addr, acct in snapshot:
-            with acct.lock:
-                acct.base = None
-                acct.next_index = 0
-                acct.pending.clear()
-
-        logger.info("[NonceWindow] All windows invalidated. Re-seed required.")
-
-    @property
-    def window_size(self) -> int:
-        """The number of sequences pre-allocated per window batch."""
-        return self._window_size
-
-    def available_slots(self, address: str) -> int:
-        """Return how many sequences can still be acquired in the current window.
-
-        Returns 0 when the window is unseeded or fully exhausted.
-        """
-        acct = self._get_account(address)
-        with acct.lock:
-            if acct.base is None:
-                return 0
-            return self._window_size - acct.next_index
-
-
-# Module-level default window – import and use directly.
-nonce_window = NonceWindow()
-
-__all__ = [
-    "NonceTracker",
-    "NonceWindow",
-    "nonce_tracker",
-    "nonce_window",
-]
