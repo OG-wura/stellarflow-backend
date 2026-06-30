@@ -15,7 +15,10 @@ export declare class SorobanEventListener {
     private lastProcessedLedger;
     private pollTimer;
     constructor(pollIntervalMs?: number);
+    getOraclePublicKey(): string;
     start(): Promise<void>;
+    restart(pollIntervalMs?: number): void;
+    private startPollingTimer;
     /**
      * Worker loop that processes packets from the queue at a controlled pace.
      */

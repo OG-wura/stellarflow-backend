@@ -32,12 +32,14 @@ router.get("/latest", cacheMiddleware({
             });
         }
         else {
-            sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (result.error) === "string" ? String(result.error) : undefined);
+            sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof result.error === "string" ? String(result.error) : undefined);
         }
     }
     catch (error) {
         console.error("Error fetching latest prices:", error);
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error ? error.message : "Failed to fetch latest prices");
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error
+            ? error.message
+            : "Failed to fetch latest prices");
     }
 });
 // Pending reviews
@@ -53,7 +55,9 @@ router.get("/reviews/pending", cacheMiddleware({
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error ? error.message : "Failed to fetch pending price reviews");
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error
+            ? error.message
+            : "Failed to fetch pending price reviews");
     }
 });
 // Approve review
@@ -72,8 +76,11 @@ router.post("/reviews/:id/approve", invalidateCache("market-rates:*"), async (re
         });
     }
     catch (error) {
-        const status = isLockdownError(error) ? error.statusCode : 500;
-        sendApiError(res, status, status === 403 ? "LOCKDOWN_ACTIVE" : "INTERNAL_SERVER_ERROR", error instanceof Error ? error.message : "Failed to approve price review");
+        const statusCode = isLockdownError(error) ? error.statusCode : 500;
+        const is403 = statusCode === 403;
+        sendApiError(res, statusCode, isLockdownError(error) ? "LOCKDOWN_ACTIVE" : "INTERNAL_SERVER_ERROR", error instanceof Error
+            ? error.message
+            : "Failed to approve price review");
     }
 });
 // Reject review
@@ -92,7 +99,9 @@ router.post("/reviews/:id/reject", invalidateCache("market-rates:*"), async (req
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error ? error.message : "Failed to reject price review");
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", error instanceof Error
+            ? error.message
+            : "Failed to reject price review");
     }
 });
 // Health check
@@ -109,7 +118,11 @@ router.get("/health", cacheMiddleware({
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error ? error.message : "Internal server error") === "string" ? String(error instanceof Error ? error.message : "Internal server error") : undefined);
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error
+            ? error.message
+            : "Internal server error") === "string"
+            ? String(error instanceof Error ? error.message : "Internal server error")
+            : undefined);
     }
 });
 // Supported currencies
@@ -125,7 +138,11 @@ router.get("/currencies", cacheMiddleware({
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error ? error.message : "Internal server error") === "string" ? String(error instanceof Error ? error.message : "Internal server error") : undefined);
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error
+            ? error.message
+            : "Internal server error") === "string"
+            ? String(error instanceof Error ? error.message : "Internal server error")
+            : undefined);
     }
 });
 // Cache status
@@ -138,7 +155,11 @@ router.get("/cache", (req, res) => {
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error ? error.message : "Internal server error") === "string" ? String(error instanceof Error ? error.message : "Internal server error") : undefined);
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error
+            ? error.message
+            : "Internal server error") === "string"
+            ? String(error instanceof Error ? error.message : "Internal server error")
+            : undefined);
     }
 });
 // Clear cache
@@ -151,7 +172,11 @@ router.post("/cache/clear", (req, res) => {
         });
     }
     catch (error) {
-        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error ? error.message : "Internal server error") === "string" ? String(error instanceof Error ? error.message : "Internal server error") : undefined);
+        sendApiError(res, 500, "INTERNAL_SERVER_ERROR", typeof (error instanceof Error
+            ? error.message
+            : "Internal server error") === "string"
+            ? String(error instanceof Error ? error.message : "Internal server error")
+            : undefined);
     }
 });
 export default router;
