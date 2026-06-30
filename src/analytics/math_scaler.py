@@ -17,6 +17,9 @@ from fractions import Fraction
 SCALE_7: int = 10_000_000            # 10^7
 SCALE_14: int = 100_000_000_000_000  # 10^14
 
+# Fixed-point rescale depth: each level multiplies or divides by SCALE_7 (10^7).
+SCALE_SHIFT: int = 7
+
 _D_SCALE_7 = Decimal(SCALE_7)
 _D_SCALE_14 = Decimal(SCALE_14)
 
@@ -42,6 +45,57 @@ def _to_decimal(value: Number, name: str = "value") -> Decimal:
     if not d.is_finite():
         raise ValueError(f"{name} must be finite, got {value!r}.")
     return d
+
+
+def _shift_scale_int(value: int, shift_levels: int) -> int:
+    """Rescale a fixed-point integer by *shift_levels* decimal-scale steps.
+
+    Each step applies a deterministic multiply (left shift) or floor-divide
+    (right shift) by ``SCALE_7``, keeping the entire pipeline in integer space.
+    """
+    if shift_levels == 0:
+        return value
+
+    result = value
+    if shift_levels > 0:
+        for _ in range(shift_levels):
+            result *= SCALE_7
+        return result
+
+    for _ in range(-shift_levels):
+        result //= SCALE_7
+    return result
+
+
+def _multiply_hop_chain(hops: tuple[int, ...]) -> int:
+    """Fold a corridor hop chain into a single ``SCALE_7`` rate integer."""
+    product = 1
+    for hop in hops:
+        product *= hop
+    return _shift_scale_int(product, -(len(hops) - 1))
+
+
+def _apply_route_weight(scaled_rate: int, weight: int) -> int:
+    """Apply a ``SCALE_7`` corridor weight to a ``SCALE_7`` route rate."""
+    return scaled_rate * weight
+
+
+def _normalize_weighted_sum(weighted_sum: int, weight_total: int) -> int:
+    """Collapse a ``SCALE_14`` weighted sum back to ``SCALE_7`` precision."""
+    if weight_total == 0:
+        raise ZeroDivisionError("Total route weight scales to zero at SCALE_7.")
+    return weighted_sum // weight_total // SCALE_7
+
+
+class ArbitrageRouteMatrix(NamedTuple):
+    """Integer-only matrix layout for multi-hop cross-corridor arbitrage routes.
+
+    ``hops`` stores one corridor per row; every cell is a ``SCALE_7`` rate.
+    ``weights`` holds one ``SCALE_7`` corridor weight per row.
+    """
+
+    hops: tuple[tuple[int, ...], ...]
+    weights: tuple[int, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +253,66 @@ def sqrt_scaled(value: int, scale: int = SCALE_7) -> int:
     return answer
 
 
+def build_arbitrage_route_matrix(
+    routes: Sequence[Sequence[Number]],
+    weights: Sequence[Number] | None = None,
+) -> ArbitrageRouteMatrix:
+    """Build an integer-only route matrix from raw corridor hop rates.
+
+    Parameters
+    ----------
+    routes:
+        Each inner sequence is one cross-corridor hop chain.
+    weights:
+        Optional corridor weights scaled to ``SCALE_7``.  Defaults to equal
+        weight ``1.0`` per corridor.
+    """
+    if not routes:
+        raise ValueError("At least one corridor route is required.")
+
+    hop_matrix = tuple(tuple(scale_up(rate) for rate in route) for route in routes)
+    if any(len(route) == 0 for route in hop_matrix):
+        raise ValueError("Each corridor route must contain at least one hop rate.")
+
+    if weights is None:
+        weight_ints = tuple(SCALE_7 for _ in routes)
+    else:
+        if len(weights) != len(routes):
+            raise ValueError("weights length must match the number of routes.")
+        weight_ints = tuple(scale_up(weight) for weight in weights)
+
+    return ArbitrageRouteMatrix(hops=hop_matrix, weights=weight_ints)
+
+
+def solve_multi_hop_corridor(rates: Sequence[Number]) -> int:
+    """Calculate a single multi-hop corridor rate at ``SCALE_7`` precision.
+
+    All hop products and rescaling steps use integer-only fixed-point math.
+    """
+    hops = tuple(scale_up(rate) for rate in rates)
+    if not hops:
+        raise ValueError("At least one hop rate is required.")
+    return _multiply_hop_chain(hops)
+
+
+def solve_arbitrage_route(matrix: ArbitrageRouteMatrix) -> int:
+    """Solve weighted multi-hop cross-corridor rates from an integer matrix.
+
+    Corridor hop chains are multiplied in integer space, weights are applied
+    via fixed-point shift scaling, and the aggregate result is normalized back
+    to ``SCALE_7`` for on-chain payload compatibility.
+    """
+    weighted_sum = 0
+    weight_total = 0
+
+    for route, weight in zip(matrix.hops, matrix.weights):
+        route_rate = _multiply_hop_chain(route)
+        weighted_sum += _apply_route_weight(route_rate, weight)
+        weight_total += weight
+
+    return _normalize_weighted_sum(weighted_sum, weight_total)
+
+
 def pack_rate(value: Number) -> int:
     """Convenience wrapper: scale *value* to a ``SCALE_7`` integer for payload packing.
 
@@ -276,6 +390,7 @@ def scaled_to_fraction(
 __all__ = [
     "SCALE_7",
     "SCALE_14",
+    "SCALE_SHIFT",
     "Number",
     "ConversionMatrix",
     "scale_up",
@@ -284,6 +399,9 @@ __all__ = [
     "cross_feed_multiply",
     "floor_divide",
     "sqrt_scaled",
+    "build_arbitrage_route_matrix",
+    "solve_multi_hop_corridor",
+    "solve_arbitrage_route",
     "pack_rate",
     "build_conversion_matrix",
     "convert_path",
