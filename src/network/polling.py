@@ -1,15 +1,8 @@
-"""network/polling.py – Bounded asynchronous task collections for periodic price checks.
-
-Background polling loops must not spawn unchecked, floating ``asyncio.create_task``
-coroutines.  Each tracking interval is modelled as a structured
-:class:`asyncio.TaskGroup` so every auxiliary worker is explicitly awaited (or
-cancelled) before the next cycle begins.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from network.http_client import FetchTimeoutError, fetch_json, make_session
@@ -18,6 +11,54 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL_MS: int = 10_000
 DEFAULT_POLL_INTERVAL_S: float = DEFAULT_POLL_INTERVAL_MS / 1000
+
+
+class RegionalPollingEngine:
+    def __init__(self, endpoints: Dict[str, str]):
+        """
+        Initializes the engine with a directory map of regional exchange endpoints.
+        Example: {"US-EAST": "https://us.exchange...", "EU-WEST": "https://eu.exchange..."}
+        """
+        self.endpoints = endpoints
+
+    async def _fetch_regional_data(self, session, region: str, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetches telemetry metrics from a single regional endpoint using the adaptive timeout from http_client.
+        """
+        try:
+            logger.debug("Dispatching async request to region [%s] -> %s", region, url)
+            data = await fetch_json(session, url)
+            if isinstance(data, dict):
+                return {"region": region, "status": "SUCCESS", "payload": data}
+            logger.warning("Region [%s] returned non-dict payload", region)
+            return {"region": region, "status": "ERROR", "code": "non-dict payload"}
+        except FetchTimeoutError:
+            logger.error("Region [%s] timed out", region)
+            return {"region": region, "status": "TIMEOUT", "error": "adaptive timeout breached"}
+        except Exception as e:
+            logger.error("Transport connectivity breakdown for region [%s]: %s", region, str(e))
+            return {"region": region, "status": "TRANSPORT_FAILURE", "error": str(e)}
+
+    async def poll_all_regions_concurrently(self) -> List[Dict[str, Any]]:
+        """
+        Orchestrates parallel non-blocking evaluation of all regional endpoints.
+        Slow routes are safely dropped without stalling processing cycles for healthy paths.
+        """
+        start_time = time.monotonic()
+        logger.info("Initializing concurrent poll cycle across %d endpoints...", len(self.endpoints))
+
+        async with make_session() as session:
+            tasks = [
+                self._fetch_regional_data(session, region, url)
+                for region, url in self.endpoints.items()
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+
+            total_duration = (time.monotonic() - start_time) * 1000
+            logger.info("Completed concurrent polling cycle in %.2fms total.", total_duration)
+            return list(results)
+
 
 PriceCheckHandler = Callable[[str, Dict[str, Any]], Awaitable[None]]
 PriceFetcher = Callable[[Any, str], Awaitable[Optional[Dict[str, Any]]]]
