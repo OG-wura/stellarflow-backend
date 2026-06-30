@@ -162,19 +162,29 @@ def pack_frame(frame: TelemetryFrame) -> bytes:
     return TelemetryEncoder.pack(frame)
 
 
-def unpack_frame(data: bytes) -> TelemetryFrame:
-    """Deserialise a 40-byte buffer back into a :class:`TelemetryFrame`.
 
-    Only the first ``FRAME_SIZE`` bytes are consumed; trailing bytes are
-    silently ignored, which allows safe slicing from a larger buffer.
+def pack_frame(frame: TelemetryFrame) -> bytes:
+    """Serialize a single TelemetryFrame into a FlatBuffers buffer."""
+    builder = flatbuffers.Builder(0)
+    
+    # Create asset_id vector
+    asset_bytes = frame.asset_id
+    asset_offset = builder.CreateByteVector(asset_bytes)
+    
+    # Build the TelemetryFrame
+    TelemetryFrameStart(builder)
+    TelemetryFrameAddAssetId(builder, asset_offset)
+    TelemetryFrameAddPrice(builder, frame.price)
+    TelemetryFrameAddVolume(builder, frame.volume)
+    TelemetryFrameAddTimestamp(builder, frame.timestamp)
+    TelemetryFrameAddSequence(builder, frame.sequence)
+    TelemetryFrameAddFlags(builder, frame.flags)
+    TelemetryFrameAddFeedId(builder, frame.feed_id)
+    frame_offset = TelemetryFrameEnd(builder)
+    
+    builder.Finish(frame_offset)
+    return bytes(builder.Output())
 
-    Args:
-        data: Raw bytes produced by :func:`pack_frame`.  Must be at least
-              ``FRAME_SIZE`` (40) bytes long.
-
-    Returns:
-        A :class:`TelemetryFrame` with ``asset_id`` right-stripped of
-        null-padding bytes.
 
     Raises:
         struct.error: If ``data`` is shorter than ``FRAME_SIZE``.
@@ -213,42 +223,24 @@ def unpack_bundle(data: bytes) -> list[TelemetryFrame]:
 
 
 def bundle_frame_count(data: bytes) -> int:
-    """Return the number of complete frames present in a raw bundle buffer.
-
-    Args:
-        data: Raw bundle bytes.
-
-    Returns:
-        Integer count of decodable frames.
-    """
-    return len(data) // _FRAME_SIZE
+    """Return the number of frames present in a FlatBuffers bundle buffer."""
+    try:
+        buf = bytearray(data)
+        flat_bundle = FlatTelemetryBundle.GetRootAs(buf, 0)
+        return flat_bundle.FramesLength()
+    except Exception:
+        return 0
 
 
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
 def encode_asset_id(symbol: str) -> bytes:
-    """Encode a human-readable asset-pair symbol into a fixed 8-byte field.
-
-    Args:
-        symbol: ASCII string such as ``"NGN/XLM"`` (max 8 chars).
-
-    Returns:
-        An 8-byte ``bytes`` object — truncated and zero-padded as needed.
-    """
-    return symbol.encode("ascii", errors="replace")[:8].ljust(8, b"\x00")
+    """Encode a human-readable asset-pair symbol into bytes."""
+    return symbol.encode("ascii", errors="replace")
 
 
 def decode_asset_id(asset_bytes: bytes) -> str:
-    """Decode an 8-byte asset-id field back into a readable string.
+    """Decode asset_id bytes back into a readable string."""
+    return asset_bytes.decode("ascii", errors="replace")
 
-    Args:
-        asset_bytes: Raw bytes from a :class:`TelemetryFrame`.
-
-    Returns:
-        ASCII string with null bytes stripped.
-    """
-    return asset_bytes.rstrip(b"\x00").decode("ascii", errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -612,9 +604,7 @@ class StructPackEncoder:
 
 # ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 __all__ = [
-    # Types
     "TelemetryFrame",
     "RingBufferMetric",
     "BackpressureMetric",
@@ -633,11 +623,9 @@ __all__ = [
     # Single-frame codec
     "pack_frame",
     "unpack_frame",
-    # Batch codec
     "pack_bundle",
     "unpack_bundle",
     "bundle_frame_count",
-    # Helpers
     "encode_asset_id",
     "decode_asset_id",
     # Size constants
@@ -645,6 +633,3 @@ __all__ = [
     # Issue #613 — struct-pack IPC encoder
     "StructPackEncoder",
 ]
-
-#: Exported constant — size in bytes of one packed telemetry frame.
-FRAME_SIZE: int = _FRAME_SIZE
