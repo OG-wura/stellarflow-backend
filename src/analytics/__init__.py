@@ -14,6 +14,7 @@ from .checked_math import (
 )
 from .ema import RollingEMA, update_ema, ema_sequence, smoothing_factor, progressive_smoothing_factor
 from .latency import LatencyTracker, PacketLatencyRecord, LatencyMetrics, latency_tracker
+from .variance import IntegerVarianceEngine, VarianceParameters, parse_consensus_variance
 
 __all__ = [
     "BoundaryViolationError",
@@ -37,4 +38,7 @@ __all__ = [
     "PacketLatencyRecord",
     "LatencyMetrics",
     "latency_tracker",
+    "IntegerVarianceEngine",
+    "VarianceParameters",
+    "parse_consensus_variance",
 ]
