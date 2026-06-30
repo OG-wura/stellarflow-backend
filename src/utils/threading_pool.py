@@ -9,6 +9,7 @@ from queue import Queue, Full, Empty
 import struct
 from typing import Callable, Optional
 import logging
+import os
 
 
 logger = logging.getLogger("Utils.SharedMemory")
@@ -198,13 +199,17 @@ class DynamicThreadingPool:
         self._state = _PoolState(worker_count=min_workers)
         self._threads: list[threading.Thread] = []
         self._supervisor_thread: Optional[threading.Thread] = None
+        # Counter for assigning deterministic IDs to workers
+        self._next_worker_id: int = 0
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _make_worker_thread(self) -> threading.Thread:
-        """Create (but do not start) a daemon worker thread."""
+        """Create (but do not start) a daemon worker thread with a unique ID."""
+        worker_id = self._next_worker_id
+        self._next_worker_id += 1
         return threading.Thread(
             target=_worker_with_sentinel,
             args=(
@@ -212,8 +217,10 @@ class DynamicThreadingPool:
                 self._stop_event,
                 self._state,
                 self._lock,
+                worker_id,
             ),
             daemon=True,
+            name=f"ThreadingPool-Worker-{worker_id}",
         )
 
     # ------------------------------------------------------------------
@@ -313,12 +320,15 @@ def _worker_with_sentinel(
     stop_event: threading.Event,
     state: _PoolState,
     lock: threading.Lock,
+    worker_id: int,
 ) -> None:
     """Worker loop that also handles the ``None`` scale-down sentinel.
 
     When the supervisor wants to remove a worker it enqueues ``None``.  The
     first worker to dequeue it exits cleanly, reducing the active count by one.
     """
+        # Set CPU affinity for this worker before processing tasks
+    CoreAffinityManager.assign_affinity(worker_id)
     while not stop_event.is_set():
         try:
             task = work_queue.get(timeout=_WORKER_TIMEOUT)
