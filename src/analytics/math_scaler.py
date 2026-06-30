@@ -129,7 +129,7 @@ def cross_feed_multiply(
         A deterministic integer at *output_scale* precision.
     """
     product_14 = multiply_rates(rate_a, rate_b)
-    return product_14 // SCALE_7
+    return product_14 // (SCALE_14 // output_scale)
 
 
 def floor_divide(scaled_value: int, divisor: Number) -> int:
@@ -154,6 +154,48 @@ def floor_divide(scaled_value: int, divisor: Number) -> int:
     if divisor_int == 0:
         raise ZeroDivisionError(f"Divisor {divisor!r} scales to zero at SCALE_7.")
     return (scaled_value * SCALE_7) // divisor_int
+
+
+def sqrt_scaled(value: int, scale: int = SCALE_7) -> int:
+    """Return the fixed-point square root of a scaled integer.
+
+    ``value`` is expected to be scaled by *scale*, and the returned integer uses
+    the same scale.  The calculation is strictly integer-only:
+
+    ``sqrt(value / scale) * scale == sqrt(value * scale)``
+
+    The final square root is calculated with binary search and floors toward
+    zero, matching the truncation behavior used across this module.
+    """
+    if isinstance(value, bool):
+        raise TypeError("value must be an integer, not bool.")
+    if not isinstance(value, int):
+        raise TypeError("value must be a scaled integer.")
+    if isinstance(scale, bool) or not isinstance(scale, int):
+        raise TypeError("scale must be an integer.")
+    if value < 0:
+        raise ValueError("Cannot calculate square root of a negative value.")
+    if scale <= 0:
+        raise ValueError("scale must be positive.")
+
+    radicand = value * scale
+    if radicand < 2:
+        return radicand
+
+    low = 0
+    high = radicand
+    answer = 0
+
+    while low <= high:
+        mid = (low + high) // 2
+        square = mid * mid
+        if square <= radicand:
+            answer = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return answer
 
 
 def pack_rate(value: Number) -> int:
@@ -185,5 +227,6 @@ __all__ = [
     "multiply_rates",
     "cross_feed_multiply",
     "floor_divide",
+    "sqrt_scaled",
     "pack_rate",
 ]

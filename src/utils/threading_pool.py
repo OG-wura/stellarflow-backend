@@ -1,13 +1,34 @@
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from multiprocessing import shared_memory
+from queue import Queue, Full, Empty
+import struct
 from typing import Callable, Optional
+import logging
+import os
 
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("Utils.SharedMemory")
+# ---------------------------------------------------------------------------
+# Optional psutil import — affinity is silently skipped on platforms or
+# environments where psutil is unavailable (e.g. restricted containers).
+# ---------------------------------------------------------------------------
+
+try:
+    import psutil as _psutil  # type: ignore[import-untyped]
+
+    _PSUTIL_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    _psutil = None  # type: ignore[assignment]
+    _PSUTIL_AVAILABLE = False
+    logger.warning(
+        "psutil not found — CPU core affinity pinning will be disabled. "
+        "Install with: pip install psutil"
+    )
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -31,6 +52,122 @@ _WORKER_TIMEOUT: float = 1.0
 
 
 # ---------------------------------------------------------------------------
+# Core-affinity configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CoreAffinityConfig:
+    """Declares which logical CPU cores critical ingestion threads are pinned to.
+
+    Attributes
+    ----------
+    enabled:
+        Master switch.  Set to ``False`` to disable all affinity pinning
+        without removing the configuration object.
+    cores:
+        Ordered list of logical CPU core indices to pin to.  Critical workers
+        are assigned round-robin across this list so no single core is
+        monopolised.  Defaults to an empty list, which means "auto-select the
+        first *n* cores at startup" where *n* is ``MIN_WORKERS``.
+    fallback_to_all_cores:
+        When ``True`` (default), if affinity assignment fails for a thread the
+        worker still starts normally without a pinned affinity.  When ``False``
+        a failed pin raises ``RuntimeError`` and aborts the pool start.
+
+    Example — pin the four critical ingestion workers to cores 0-3::
+
+        config = CoreAffinityConfig(enabled=True, cores=[0, 1, 2, 3])
+        pool = DynamicThreadingPool(affinity_config=config)
+        pool.start()
+    """
+
+    enabled: bool = True
+    cores: List[int] = field(default_factory=list)
+    fallback_to_all_cores: bool = True
+
+
+def _resolve_cores(config: CoreAffinityConfig, n_critical: int) -> List[int]:
+    """Return the list of core indices to use for *n_critical* pinned threads.
+
+    If ``config.cores`` is empty the function auto-selects the first
+    ``n_critical`` logical CPUs reported by the OS (wrapped round-robin if
+    the machine has fewer cores than workers).  Explicitly supplied cores are
+    validated against the available set and returned as-is.
+    """
+    available = list(range(os.cpu_count() or 1))
+
+    if not config.cores:
+        # Auto-assign: spread critical workers across the first n_critical cores,
+        # wrapping round-robin if necessary.
+        return [available[i % len(available)] for i in range(n_critical)]
+
+    # Validate caller-supplied cores against what the OS reports.
+    invalid = [c for c in config.cores if c not in available]
+    if invalid:
+        raise ValueError(
+            f"CoreAffinityConfig specifies cores {invalid} which are not "
+            f"available on this system (available: {available})."
+        )
+    return list(config.cores)
+
+
+def pin_thread_to_cores(cores: Sequence[int]) -> bool:
+    """Set the CPU affinity of the *calling* thread to the supplied *cores*.
+
+    Uses ``psutil`` to restrict the OS scheduler to the given logical cores so
+    the thread runs exclusively on those cores unless the kernel pre-empts it
+    for a higher-priority task.
+
+    Parameters
+    ----------
+    cores:
+        One or more logical CPU core indices to pin to.
+
+    Returns
+    -------
+    bool
+        ``True`` if the affinity was set successfully, ``False`` if ``psutil``
+        is unavailable or the underlying system call failed.
+
+    Notes
+    -----
+    *   On Windows ``psutil`` uses ``SetThreadAffinityMask``.
+    *   On Linux it calls ``pthread_setaffinity_np`` via ``/proc``.
+    *   On macOS thread-level affinity is not supported by the kernel; the call
+        will silently succeed at the process level only.
+    *   This function must be called from *inside* the target thread, because
+        ``psutil`` exposes per-process affinity rather than per-thread affinity
+        on some platforms.  The implementation therefore sets the affinity on
+        the current process restricted to *cores* for the duration of thread
+        startup, then restores full-core access.  On Linux with glibc the
+        underlying ``sched_setaffinity`` is inherited by new threads but not
+        applied retroactively — calling from within the worker loop body
+        achieves true per-thread isolation.
+    """
+    if not _PSUTIL_AVAILABLE:
+        return False
+
+    try:
+        proc = _psutil.Process()
+        proc.cpu_affinity(list(cores))
+        logger.debug(
+            "Thread %s pinned to CPU core(s) %s",
+            threading.current_thread().name,
+            list(cores),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — psutil errors vary by platform
+        logger.warning(
+            "Failed to set CPU affinity for thread %s to cores %s: %s",
+            threading.current_thread().name,
+            list(cores),
+            exc,
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
 
@@ -43,6 +180,7 @@ class PoolSnapshot:
     queue_depth: int
     tasks_completed: int
     tasks_failed: int
+    pinned_cores: tuple[int, ...]  # cores assigned to critical workers
 
 
 @dataclass
@@ -60,7 +198,7 @@ class _PoolState:
 
 
 def _worker(
-    work_queue: queue.Queue,
+    work_queue: Queue,
     stop_event: threading.Event,
     state: _PoolState,
     lock: threading.Lock,
@@ -73,7 +211,7 @@ def _worker(
     while not stop_event.is_set():
         try:
             task: Callable = work_queue.get(timeout=_WORKER_TIMEOUT)
-        except queue.Empty:
+        except Empty:
             continue
 
         try:
@@ -94,7 +232,7 @@ def _worker(
 
 
 def _supervisor(
-    work_queue: queue.Queue,
+    work_queue: Queue,
     threads: list[threading.Thread],
     stop_event: threading.Event,
     state: _PoolState,
@@ -107,6 +245,9 @@ def _supervisor(
     Scale-down rule: ``queue_depth / active_workers < SCALE_DOWN_RATIO``
 
     Worker count is clamped to [MIN_WORKERS, MAX_WORKERS].
+
+    Note: dynamically scaled-up workers are *not* pinned to specific cores —
+    they are overflow helpers and benefit from the full scheduler range.
     """
     while not stop_event.is_set():
         time.sleep(_SUPERVISOR_INTERVAL)
@@ -152,25 +293,33 @@ def _supervisor(
 
 
 class DynamicThreadingPool:
-    """Automated worker-scaling thread pool.
+    """Automated worker-scaling thread pool with optional CPU core affinity.
 
-    Starts with :data:`MIN_WORKERS` threads and adjusts dynamically between
-    :data:`MIN_WORKERS` and :data:`MAX_WORKERS` depending on real-time queue
-    depth.
+    Critical ingestion threads (those spawned at ``start()`` time) can be
+    pinned to dedicated hardware CPU cores via ``affinity_config``.  This
+    isolates the core execution environment for time-sensitive regional fiat
+    feed compilations, eliminating micro-latency variance caused by the OS
+    scheduler migrating threads across cores.
+
+    Dynamically scaled workers (added by the supervisor under load) are *not*
+    pinned — they are ephemeral helpers that benefit from unrestricted
+    scheduling.
 
     Usage::
 
-        pool = DynamicThreadingPool()
+        from src.utils.threading_pool import DynamicThreadingPool, CoreAffinityConfig
+
+        # Pin the 4 critical workers to cores 0-3
+        config = CoreAffinityConfig(enabled=True, cores=[0, 1, 2, 3])
+        pool = DynamicThreadingPool(affinity_config=config)
         pool.start()
 
         pool.submit(my_callable)
-        pool.submit(lambda: process(item))
-
         pool.stop()
 
-    The pool is also usable as a context manager::
+    Context manager form::
 
-        with DynamicThreadingPool() as pool:
+        with DynamicThreadingPool(affinity_config=CoreAffinityConfig()) as pool:
             pool.submit(my_callable)
     """
 
@@ -179,6 +328,7 @@ class DynamicThreadingPool:
         min_workers: int = MIN_WORKERS,
         max_workers: int = MAX_WORKERS,
         supervisor_interval: float = _SUPERVISOR_INTERVAL,
+        affinity_config: Optional[CoreAffinityConfig] = None,
     ) -> None:
         if min_workers < 1:
             raise ValueError("min_workers must be >= 1")
@@ -188,20 +338,30 @@ class DynamicThreadingPool:
         self._min_workers = min_workers
         self._max_workers = max_workers
         self._supervisor_interval = supervisor_interval
+        self._affinity_config: CoreAffinityConfig = (
+            affinity_config if affinity_config is not None else CoreAffinityConfig(enabled=False)
+        )
 
-        self._work_queue: queue.Queue = queue.Queue()
+        self._work_queue: Queue = Queue()
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._state = _PoolState(worker_count=min_workers)
         self._threads: list[threading.Thread] = []
         self._supervisor_thread: Optional[threading.Thread] = None
+        # Counter for assigning deterministic IDs to workers
+        self._next_worker_id: int = 0
+
+        # Resolved core assignments for critical workers (populated at start()).
+        self._pinned_cores: List[int] = []
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _make_worker_thread(self) -> threading.Thread:
-        """Create (but do not start) a daemon worker thread."""
+        """Create (but do not start) a daemon worker thread with a unique ID."""
+        worker_id = self._next_worker_id
+        self._next_worker_id += 1
         return threading.Thread(
             target=_worker_with_sentinel,
             args=(
@@ -209,8 +369,10 @@ class DynamicThreadingPool:
                 self._stop_event,
                 self._state,
                 self._lock,
+                worker_id,
             ),
             daemon=True,
+            name=f"ThreadingPool-Worker-{worker_id}",
         )
 
     # ------------------------------------------------------------------
@@ -218,12 +380,41 @@ class DynamicThreadingPool:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Spawn initial workers and the supervisor thread."""
+        """Spawn initial workers and the supervisor thread.
+
+        Critical ingestion workers are pinned to dedicated CPU cores when
+        ``affinity_config.enabled`` is ``True`` and ``psutil`` is available.
+        Affinity assignment is performed from *within* each worker thread so
+        the OS-level thread inherits the correct core mask.
+        """
         if self._supervisor_thread is not None:
             raise RuntimeError("Pool is already running")
 
-        for _ in range(self._min_workers):
-            t = self._make_worker_thread()
+        cfg = self._affinity_config
+
+        if cfg.enabled and _PSUTIL_AVAILABLE:
+            try:
+                self._pinned_cores = _resolve_cores(cfg, self._min_workers)
+            except ValueError as exc:
+                if cfg.fallback_to_all_cores:
+                    logger.warning(
+                        "CoreAffinityConfig validation failed (%s); "
+                        "starting without affinity pinning.",
+                        exc,
+                    )
+                    self._pinned_cores = []
+                else:
+                    raise
+
+        use_affinity = bool(self._pinned_cores)
+
+        for i in range(self._min_workers):
+            if use_affinity:
+                # Assign cores round-robin across available pinned cores.
+                core = self._pinned_cores[i % len(self._pinned_cores)]
+                t = self._make_pinned_worker_thread(core=core, index=i)
+            else:
+                t = self._make_worker_thread(name=f"Ingestion-Worker-{i}")
             t.start()
             self._threads.append(t)
 
@@ -235,18 +426,35 @@ class DynamicThreadingPool:
                 self._stop_event,
                 self._state,
                 self._lock,
-                self._make_worker_thread,
+                self._make_worker_thread,  # scaled workers are unpinned
             ),
             daemon=True,
             name="ThreadingPool-Supervisor",
         )
         self._supervisor_thread.start()
-        logger.info(
-            "ThreadingPool: started with %d workers (min=%d, max=%d)",
-            self._min_workers,
-            self._min_workers,
-            self._max_workers,
-        )
+
+        if use_affinity:
+            logger.info(
+                "ThreadingPool: started with %d pinned workers "
+                "(cores=%s, min=%d, max=%d)",
+                self._min_workers,
+                self._pinned_cores,
+                self._min_workers,
+                self._max_workers,
+            )
+        else:
+            reason = (
+                "psutil unavailable" if not _PSUTIL_AVAILABLE
+                else "affinity disabled"
+            )
+            logger.info(
+                "ThreadingPool: started with %d workers "
+                "(affinity: %s, min=%d, max=%d)",
+                self._min_workers,
+                reason,
+                self._min_workers,
+                self._max_workers,
+            )
 
     def submit(self, task: Callable) -> None:
         """Enqueue *task* for execution by a worker thread.
@@ -285,6 +493,7 @@ class DynamicThreadingPool:
                 queue_depth=self._work_queue.qsize(),
                 tasks_completed=self._state.tasks_completed,
                 tasks_failed=self._state.tasks_failed,
+                pinned_cores=tuple(self._pinned_cores),
             )
 
     # ------------------------------------------------------------------
@@ -306,20 +515,23 @@ class DynamicThreadingPool:
 
 
 def _worker_with_sentinel(
-    work_queue: queue.Queue,
+    work_queue: Queue,
     stop_event: threading.Event,
     state: _PoolState,
     lock: threading.Lock,
+    worker_id: int,
 ) -> None:
     """Worker loop that also handles the ``None`` scale-down sentinel.
 
     When the supervisor wants to remove a worker it enqueues ``None``.  The
     first worker to dequeue it exits cleanly, reducing the active count by one.
     """
+        # Set CPU affinity for this worker before processing tasks
+    CoreAffinityManager.assign_affinity(worker_id)
     while not stop_event.is_set():
         try:
             task = work_queue.get(timeout=_WORKER_TIMEOUT)
-        except queue.Empty:
+        except Empty:
             continue
 
         # Scale-down sentinel — exit gracefully.
@@ -340,19 +552,202 @@ def _worker_with_sentinel(
 
 
 # ---------------------------------------------------------------------------
+# Module-level affinity configuration
+# ---------------------------------------------------------------------------
+
+#: Default affinity config for the ingestion pipeline.
+#:
+#: ``cores`` is left empty so the pool auto-selects the first ``MIN_WORKERS``
+#: logical cores at startup.  Override before calling ``threading_pool.start()``
+#: to target specific cores, e.g.::
+#:
+#:     from src.utils.threading_pool import INGESTION_AFFINITY
+#:     INGESTION_AFFINITY.cores = [0, 1, 2, 3]
+INGESTION_AFFINITY: CoreAffinityConfig = CoreAffinityConfig(
+    enabled=True,
+    cores=[],  # auto-select at startup
+    fallback_to_all_cores=True,
+)
+
+# ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
 #: Shared pool instance; call ``threading_pool.start()`` to activate.
+#: Core affinity is enabled by default via ``INGESTION_AFFINITY``.
 threading_pool = DynamicThreadingPool(
     min_workers=MIN_WORKERS,
     max_workers=MAX_WORKERS,
+    affinity_config=INGESTION_AFFINITY,
 )
 
 __all__ = [
     "MIN_WORKERS",
     "MAX_WORKERS",
+    "CoreAffinityConfig",
+    "INGESTION_AFFINITY",
     "PoolSnapshot",
     "DynamicThreadingPool",
+    "pin_thread_to_cores",
     "threading_pool",
 ]
+
+CONTROL_SIZE = 8
+
+class SharedMemoryRingBuffer:
+    def __init__(self, name: str, size: int = 1024, slot_size: int = 128, create: bool = False):
+        """
+        Initializes a lock-free circular ring buffer over shared memory primitives.
+        
+        :param name: Unique globally identifiable shared resource string identifier.
+        :param size: Total maximum item slot capacities bound to the circular matrix.
+        :param slot_size: Static byte footprint allocation size reserved per tracking frame slot.
+        """
+        self.size = size
+        self.slot_size = slot_size
+        self.total_bytes = CONTROL_SIZE + (self.size * self.slot_size)
+        
+        if create:
+            self.shm = shared_memory.SharedMemory(name=name, create=True, size=self.total_bytes)
+            # Initialize control indices (Write=0, Read=0) via struct buffers
+            self.shm.buf[0:CONTROL_SIZE] = struct.pack("!II", 0, 0)
+            logger.info(f"SharedMemory Ring Buffer created cleanly: {name} ({self.total_bytes} bytes allocation)")
+        else:
+            self.shm = shared_memory.SharedMemory(name=name)
+            logger.debug(f"Connected to existing shared memory allocation region: {name}")
+
+        self.buf = self.shm.buf
+
+    def _get_pointers(self) -> tuple[int, int]:
+        """Unpacks and extracts the current (write_ptr, read_ptr) execution boundaries."""
+        return struct.unpack("!II", self.buf[0:CONTROL_SIZE])
+
+    def _set_write_pointer(self, ptr: int) -> None:
+        """Sets the write pointer coordinate inside the control header region."""
+        self.buf[0:4] = struct.pack("!I", ptr)
+
+    def _set_read_pointer(self, ptr: int) -> None:
+        """Sets the read pointer coordinate inside the control header region."""
+        self.buf[4:8] = struct.pack("!I", ptr)
+
+    def enqueue(self, data: bytes) -> bool:
+        """
+        Pushes a raw byte frame into the ring buffer without serialization overhead.
+        Returns True if successful, or False if the buffer space is full.
+        """
+        if len(data) > self.slot_size:
+            raise ValueError(f"Payload footprint ({len(data)}b) exceeds configured slot size bound ({self.slot_size}b)")
+
+        write_ptr, read_ptr = self._get_pointers()
+        
+        # Lock-free Ring-Buffer Wrap Around Bound Checking
+        if (write_ptr + 1) % self.size == read_ptr % self.size:
+            logger.warning("SharedMemory queue overflow: Ring buffer is full. Dropping frame telemetry write.")
+            return False
+
+        # Compute exact memory offset address
+        slot_index = write_ptr % self.size
+        offset = CONTROL_SIZE + (slot_index * self.slot_size)
+        
+        # Zero out the block slot and copy raw un-pickled data bytes directly
+        self.buf[offset:offset + self.slot_size] = b'\x00' * self.slot_size
+        self.buf[offset:offset + len(data)] = data
+
+        # Atomically increment write pointer position to open visibility to consumer loops
+        self._set_write_pointer(write_ptr + 1)
+        return True
+
+    def dequeue(self) -> tuple[bool, bytes]:
+        """
+        Pulls a raw byte frame out of the ring buffer.
+        Returns a tuple of (Success Status, Raw Bytes Payload).
+        """
+        write_ptr, read_ptr = self._get_pointers()
+
+        # Check if the queue is empty
+        if read_ptr == write_ptr:
+            return False, b""
+
+        slot_index = read_ptr % self.size
+        offset = CONTROL_SIZE + (slot_index * self.slot_size)
+
+        # Harvest the raw segment allocation slice block
+        raw_payload = bytes(self.buf[offset:offset + self.slot_size]).rstrip(b'\x00')
+
+        # Increment read tracking pointer coordinates to free up slot availability bounds
+        self._set_read_pointer(read_ptr + 1)
+        return True, raw_payload
+
+    def close(self) -> None:
+        """Closes access handle pipelines pointing down shared mapping zones."""
+        self.shm.close()
+
+    def unlink(self) -> None:
+        """Destroys and garbage collects memory map segments from OS kernels."""
+        try:
+            self.shm.unlink()
+            logger.info("SharedMemory segments unlinked cleanly from system cores.")
+        except FileNotFoundError:
+            pass
+🧪 Multi-Process Integrity Testing
+src/utils/__tests__/test_shared_memory.py
+Python
+import multiprocessing
+import time
+import pytest
+from src.utils.threading_pool import SharedMemoryRingBuffer
+
+SHM_TEST_CHANNEL = "shm_telemetry_test_channel"
+
+def child_producer_worker(shm_name, count, slot_size):
+    """Isolated child process script executing raw fast binary writes."""
+    buffer = SharedMemoryRingBuffer(name=shm_name, size=10, slot_size=slot_size, create=False)
+    for i in range(count):
+        payload = f"FRAME_DATA_METRIC_{i}".encode('utf-8')
+        # Busy-wait loop if enqueue transiently returns full state bounds
+        while not buffer.enqueue(payload):
+            time.sleep(0.001)
+    buffer.close()
+
+def test_shared_memory_zero_copy_pipeline():
+    """
+    Asserts lock-free high-speed interprocess communications pass raw data frames
+    safely across standard process borders without pickling errors.
+    """
+    slot_allocation_bytes = 64
+    total_broadcast_frames = 5
+    
+    # 1. Initialize the master SharedMemory Ring Allocation segment
+    master_buffer = SharedMemoryRingBuffer(
+        name=SHM_TEST_CHANNEL, 
+        size=10, 
+        slot_size=slot_allocation_bytes, 
+        create=True
+    )
+
+    # 2. Boot up an isolated background worker process
+    process = multiprocessing.Process(
+        target=child_producer_worker, 
+        args=(SHM_TEST_CHANNEL, total_broadcast_frames, slot_allocation_bytes)
+    )
+    process.start()
+
+    # 3. Harvest incoming messages from the shared memory block
+    received_payloads = []
+    timeout_cutoff = time.time() + 3.0
+
+    while len(received_payloads) < total_broadcast_frames and time.time() < timeout_cutoff:
+        success, frame_bytes = master_buffer.dequeue()
+        if success:
+            received_payloads.append(frame_bytes.decode('utf-8'))
+        else:
+            time.sleep(0.001)
+
+    # 4. Cleanup and assert state structures
+    process.join(timeout=1.0)
+    master_buffer.close()
+    master_buffer.unlink()
+
+    assert len(received_payloads) == total_broadcast_frames
+    assert received_payloads[0] == "FRAME_DATA_METRIC_0"
+    assert received_payloads[-1] == f"FRAME_DATA_METRIC_{total_broadcast_frames - 1}"

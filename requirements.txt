@@ -1,0 +1,13 @@
+# Python dependencies for the StellarFlow ingestion pipeline
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# pysimdjson provides SIMD-accelerated JSON parsing (SSE4.2 / AVX2 / AVX-512).
+# The ingestion layer uses it as a high-throughput drop-in for json.loads().
+# If a pre-built wheel is unavailable for your platform, pip will compile from
+# source — a C++11-capable compiler is required in that case.
+pysimdjson>=5.0.2
+
+# Async HTTP client used by rest_fallback.py
+aiohttp>=3.9.0
