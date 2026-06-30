@@ -9,8 +9,29 @@ shape with minimal Python object churn.
 
 from __future__ import annotations
 
+import json as _stdlib_json
 from collections.abc import Iterable, Iterator, Mapping
 from typing import TypeAlias, cast
+
+try:
+    import simdjson as _simdjson
+
+    _SIMDJSON_AVAILABLE = True
+    _parser = _simdjson.Parser()
+except ImportError:  # pragma: no cover
+    _SIMDJSON_AVAILABLE = False
+    _parser = None  # type: ignore[assignment]
+
+
+def parse_raw(raw: bytes | str | bytearray) -> object:
+    """Decode a raw JSON payload using pysimdjson SIMD hardware vectorization.
+
+    Falls back to stdlib json when pysimdjson is not installed.
+    """
+    if _SIMDJSON_AVAILABLE:
+        data = raw if isinstance(raw, (bytes, bytearray)) else raw.encode()
+        return _parser.parse(data, recursive=True)  # type: ignore[union-attr]
+    return _stdlib_json.loads(raw)
 
 TelemetryTuple: TypeAlias = tuple[str, float, int, int, int]
 TelemetrySegment: TypeAlias = tuple[TelemetryTuple, ...]
@@ -239,12 +260,62 @@ def build_telemetry_segments(
     return tuple(segments)
 
 
+def iter_flat_ticker_tuples_from_raw(
+    raw_payloads: Iterable[bytes | str | bytearray],
+    *,
+    drop_invalid: bool = False,
+) -> Iterator[TelemetryTuple]:
+    """Parse raw JSON payloads via pysimdjson then yield flat ticker tuples."""
+    return iter_flat_ticker_tuples(
+        (parse_raw(r) for r in raw_payloads),
+        drop_invalid=drop_invalid,
+    )
+
+
+def flatten_telemetry_frames_from_raw(
+    raw_payloads: Iterable[bytes | str | bytearray],
+    *,
+    drop_invalid: bool = False,
+) -> TelemetrySegment:
+    """Parse raw JSON payloads and return all frames as a flat immutable tuple."""
+    return tuple(iter_flat_ticker_tuples_from_raw(raw_payloads, drop_invalid=drop_invalid))
+
+
+def build_telemetry_segments_from_raw(
+    raw_payloads: Iterable[bytes | str | bytearray],
+    *,
+    segment_size: int = DEFAULT_SEGMENT_SIZE,
+    drop_invalid: bool = False,
+) -> TelemetrySegmentBatch:
+    """Parse raw JSON payloads and group into fixed-size immutable segments."""
+    if segment_size <= 0:
+        raise ValueError("segment_size must be greater than zero")
+
+    segments: list[TelemetrySegment] = []
+    current: list[TelemetryTuple] = []
+
+    for frame in iter_flat_ticker_tuples_from_raw(raw_payloads, drop_invalid=drop_invalid):
+        current.append(frame)
+        if len(current) == segment_size:
+            segments.append(tuple(current))
+            current = []
+
+    if current:
+        segments.append(tuple(current))
+
+    return tuple(segments)
+
+
 __all__ = [
     "DEFAULT_SEGMENT_SIZE",
     "TelemetrySegment",
     "TelemetrySegmentBatch",
     "TelemetryTuple",
     "build_telemetry_segments",
+    "build_telemetry_segments_from_raw",
     "flatten_telemetry_frames",
+    "flatten_telemetry_frames_from_raw",
     "iter_flat_ticker_tuples",
+    "iter_flat_ticker_tuples_from_raw",
+    "parse_raw",
 ]
