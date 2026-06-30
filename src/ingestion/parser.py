@@ -562,7 +562,9 @@ __all__ = [
     "TelemetryTuple",
     "build_segments_from_stream",
     "build_telemetry_segments",
+    "build_telemetry_segments_from_raw",
     "flatten_telemetry_frames",
+    "flatten_telemetry_frames_from_raw",
     "iter_flat_ticker_tuples",
     "parse_raw_pack",
 ]
