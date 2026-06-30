@@ -117,7 +117,9 @@ export class NGNRateFetcher {
             }
         }
         catch (error) {
-            this.logger.debug("VTpass + CoinGecko XLM/USD failed", { error: error instanceof Error ? error.message : error });
+            this.logger.debug("VTpass + CoinGecko XLM/USD failed", {
+                error: error instanceof Error ? error.message : error,
+            });
         }
         try {
             const coinGeckoResponse = await withRetry(() => axios.get(this.coinGeckoUrl, {
@@ -147,7 +149,9 @@ export class NGNRateFetcher {
             }
         }
         catch (error) {
-            this.logger.debug("CoinGecko direct NGN failed", { error: error instanceof Error ? error.message : error });
+            this.logger.debug("CoinGecko direct NGN failed", {
+                error: error instanceof Error ? error.message : error,
+            });
         }
         try {
             const coinGeckoResponse = await withRetry(() => axios.get(this.coinGeckoUrl, {
@@ -197,11 +201,16 @@ export class NGNRateFetcher {
             }
         }
         catch (error) {
-            this.logger.debug("CoinGecko + ExchangeRate API (NGN) failed", { error: error instanceof Error ? error.message : error });
+            this.logger.debug("CoinGecko + ExchangeRate API (NGN) failed", {
+                error: error instanceof Error ? error.message : error,
+            });
         }
         if (prices.length === 0) {
             const error = new Error("All NGN rate sources failed");
-            this.logger.fetcherError(error, "All price sources failed - no rates obtained", { attemptedSources: 3, pricesLength: prices.length });
+            this.logger.fetcherError("All price sources failed - no rates obtained", {
+                attemptedSources: 3,
+                pricesLength: prices.length,
+            });
             throw error;
         }
         const rateValues = prices
@@ -212,10 +221,7 @@ export class NGNRateFetcher {
         const pricesToUse = filteredPrices.length >= 3 ? filteredPrices : prices;
         if (pricesToUse.length < 3) {
             const error = new Error(`Need at least 3 price sources for median calculation, got ${pricesToUse.length}`);
-            this.logger.fetcherError(error.message, {
-                attemptedSources: 3,
-                pricesLength: pricesToUse.length,
-            });
+            this.logger.fetcherError(`Need at least 3 price sources for median calculation, got ${pricesToUse.length}`, { attemptedSources: 3, pricesLength: pricesToUse.length });
             throw error;
         }
         const mostRecentTimestamp = pricesToUse.reduce((latest, p) => (p.timestamp > latest ? p.timestamp : latest), pricesToUse[0]?.timestamp ?? new Date());
@@ -231,7 +237,10 @@ export class NGNRateFetcher {
     async isHealthy() {
         try {
             const rate = await this.fetchRate();
-            this.logger.info("Health check passed", { rate: rate.rate, source: rate.source });
+            this.logger.info("Health check passed", {
+                rate: rate.rate,
+                source: rate.source,
+            });
             return rate.rate > 0;
         }
         catch (error) {
