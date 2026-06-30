@@ -197,38 +197,9 @@ class LatencyTracker:
         with connection.cursor() as cursor:
             cursor.execute(create_sql)
 
-    def _persist_metrics(self, connection, json_adapter, metrics: LatencyMetrics) -> None:
-        insert_sql = f"""
-        INSERT INTO {LATENCY_TABLE_NAME} (
-            packet_id,
-            ingested_at,
-            processing_at,
-            confirmed_at,
-            total_latency_ms,
-            processing_latency_ms,
-            confirmation_latency_ms,
-            metadata,
-            recorded_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        row = metrics.to_db_row()
-        with connection.cursor() as cursor:
-            cursor.execute(
-                insert_sql,
-                (
-                    row["packet_id"],
-                    row["ingested_at"],
-                    row["processing_at"],
-                    row["confirmed_at"],
-                    row["total_latency_ms"],
-                    row["processing_latency_ms"],
-                    row["confirmation_latency_ms"],
-                    json_adapter(row["metadata"]),
-                    row["recorded_at"],
-                ),
-            )
-
     def flush(self) -> None:
+        from src.database.writer import DatabaseWriter
+
         metrics = list(self.collect_completed_metrics().values())
         if not metrics:
             logger.debug("[LatencyTracker] no completed latency records to flush")
@@ -243,8 +214,13 @@ class LatencyTracker:
         try:
             connection, json_adapter = self._connect_db()
             self._ensure_latency_table(connection)
-            for metric in metrics:
-                self._persist_metrics(connection, json_adapter, metric)
+
+            writer = DatabaseWriter(connection)
+            rows = [metric.to_db_row() for metric in metrics]
+            for row in rows:
+                row["metadata"] = json_adapter(row["metadata"])
+            writer.insert_batch(LATENCY_TABLE_NAME, rows)
+
             packet_ids = [metric.packet_id for metric in metrics]
             self._remove_exported_records(packet_ids)
             logger.info(

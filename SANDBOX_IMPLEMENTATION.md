@@ -112,18 +112,27 @@ On Linux systems, the sandbox uses seccomp (Secure Computing Mode) to filter sys
 
 ```typescript
 const allowedSyscalls = [
-  "read", "write", "open", "close",
-  "execve", "exit", "exit_group",
-  "socket", "connect", "bind",
+  "read",
+  "write",
+  "open",
+  "close",
+  "execve",
+  "exit",
+  "exit_group",
+  "socket",
+  "connect",
+  "bind",
   // ... more syscalls
 ];
 ```
 
 **Requirements**:
+
 - Kernel with seccomp support (Linux 3.5+)
 - Optional: `libseccomp-tools` for advanced filtering
 
 **Installation**:
+
 ```bash
 sudo apt-get install libseccomp-tools
 ```
@@ -145,6 +154,7 @@ On macOS, the sandbox uses `ulimit`-style resource constraints via Node.js `maxB
 ### Threat Model
 
 The sandboxing system mitigates:
+
 - **Command Injection**: Through strict syscall filtering
 - **Resource Exhaustion**: Through memory and timeout limits
 - **Privilege Escalation**: Through syscall restriction
@@ -185,6 +195,7 @@ if (!result.success) {
 ### Future Integrations
 
 Potential areas for sandboxing integration:
+
 - Script execution in `scripts/` directory
 - External API calls via subprocess
 - File processing operations
@@ -201,6 +212,7 @@ npm run test:jest sandbox.test.ts
 ### Test Coverage
 
 The test suite covers:
+
 - Platform detection
 - Policy management
 - Command execution (success/failure)
@@ -217,7 +229,8 @@ The test suite covers:
 
 **Symptom**: `[Sandbox] seccomp not available, using resource limits only`
 
-**Solution**: 
+**Solution**:
+
 - Verify Linux kernel version (3.5+)
 - Install seccomp tools: `sudo apt-get install libseccomp-tools`
 - Check `/proc/self/status` for Seccomp field
@@ -227,6 +240,7 @@ The test suite covers:
 **Symptom**: Commands fail with timeout error
 
 **Solution**:
+
 - Increase `timeoutMs` in config
 - Optimize command execution time
 - Check for resource constraints
@@ -236,6 +250,7 @@ The test suite covers:
 **Symptom**: Commands fail with memory error
 
 **Solution**:
+
 - Increase `maxMemoryMb` in config
 - Optimize command memory usage
 - Check for memory leaks in subprocess
@@ -245,6 +260,7 @@ The test suite covers:
 **Symptom**: Commands work on one platform but not another
 
 **Solution**:
+
 - Check platform-specific requirements
 - Review platform detection logic
 - Test on target platform
@@ -278,6 +294,7 @@ logger.level = "debug";
 ### Migrating Existing Code
 
 **Before**:
+
 ```typescript
 import { execSync } from "child_process";
 
@@ -286,6 +303,7 @@ console.log(output.toString());
 ```
 
 **After**:
+
 ```typescript
 import { dbSandbox } from "./security/sandbox";
 
@@ -386,7 +404,94 @@ interface SandboxResult {
 ## Support
 
 For issues or questions:
+
 1. Check this documentation
 2. Review test cases for examples
 3. Check application logs for detailed errors
 4. Open an issue with platform and configuration details
+
+---
+
+## Python Sandbox – `src/utils/sandbox.py`
+
+### Architecture
+
+Untrusted feed payloads are parsed inside a short-lived child `python3` process
+spawned by `run_parser()`. Communication uses **JSON over stdin/stdout**:
+
+```
+host process                     child process
+──────────────────────────────   ────────────────────────────────
+run_parser(parser, payload) ──► stdin: JSON {parser, payload, limits}
+                                 ↓  sets RLIMIT_AS / RLIMIT_CPU
+                                 ↓  imports ingestion.parser
+                                 ↓  calls requested function
+stdout: JSON {ok, data/error} ◄── writes result, then exits
+```
+
+The host reads the child's response with `subprocess.communicate(timeout=)`.
+If the child does not finish before the wall-clock deadline it is killed with
+`proc.kill()`. In every failure mode (timeout, crash, bad output) the host
+receives a `SandboxResult` dataclass – no exception propagates to the caller.
+
+### Resource Limits
+
+Set inside the child process before any parser code runs (POSIX `resource` module):
+
+| Limit                               | Default | Constant               |
+| ----------------------------------- | ------- | ---------------------- |
+| Virtual address space (`RLIMIT_AS`) | 256 MiB | `DEFAULT_MEMORY_BYTES` |
+| CPU time (`RLIMIT_CPU`)             | 5 s     | `DEFAULT_CPU_SECS`     |
+| Wall-clock timeout                  | 10 s    | `DEFAULT_TIMEOUT_SECS` |
+
+All limits can be overridden per call via keyword arguments to `run_parser()`.
+
+### Failure Handling
+
+| Scenario                   | `SandboxResult` fields                                  |
+| -------------------------- | ------------------------------------------------------- |
+| Success                    | `ok=True`, `data=<parsed>`, `exit_code=0`               |
+| Parser raises an exception | `ok=False`, `error=<message>`, `exit_code=1`            |
+| Wall-clock timeout         | `ok=False`, `timed_out=True`, `error="sandbox timeout"` |
+| Child crash / empty output | `ok=False`, `error=<message>`, `exit_code=<n>`          |
+| Unknown parser name        | `ok=False`, `error="Unknown parser: ..."`               |
+
+### Security Rationale
+
+- **Parser failures are contained.** A malicious payload that triggers an
+  uncaught exception, an infinite loop, or a segfault in a C extension can
+  only affect the child process; the host process is unaffected.
+- **CPU and memory are bounded.** `RLIMIT_CPU` prevents runaway computation;
+  `RLIMIT_AS` prevents memory-exhaustion attacks.
+- **No shared state.** Each sandboxed call creates an independent process with
+  its own interpreter, heap, and file descriptors. There is no shared mutable
+  state between invocations.
+- **Minimal attack surface.** The child imports only the modules it needs for
+  the requested parser; the host's in-memory state (connections, secrets, etc.)
+  is not accessible to the child.
+
+### API Reference
+
+```python
+from utils.sandbox import run_parser, SandboxResult
+
+result: SandboxResult = run_parser(
+    parser_name,        # "flatten_telemetry_frames" | "build_telemetry_segments" | …
+    payload,            # JSON-serialisable feed payload
+    timeout=10.0,       # wall-clock seconds
+    memory_bytes=256*1024*1024,
+    cpu_secs=5,
+    kwargs={},          # forwarded to the parser function
+)
+
+if result.ok:
+    process(result.data)
+else:
+    log.error("sandbox error: %s (timed_out=%s)", result.error, result.timed_out)
+```
+
+### Running Tests
+
+```bash
+PYTHONPATH=src pytest tests/test_sandbox.py -v
+```

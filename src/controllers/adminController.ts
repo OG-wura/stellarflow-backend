@@ -221,21 +221,27 @@ export const upsertRelayerRegistry = async (req: Request, res: Response) => {
       actorPublicKey: adminInfo.publicKey,
       actorName: adminInfo.name,
       actorRole: adminInfo.role,
-      eventDetails: `Relayer registry ${isUpdate ? 'updated' : 'created'} for relayer ID ${relayerId}`,
-      ...(isUpdate ? {
-        previousState: JSON.stringify({
-          contactName: existing.contactName,
-          email: existing.email,
-          organizationName: existing.organizationName,
-        }),
-      } : {}),
+      eventDetails: `Relayer registry ${isUpdate ? "updated" : "created"} for relayer ID ${relayerId}`,
+      ...(isUpdate
+        ? {
+            previousState: JSON.stringify({
+              contactName: existing.contactName,
+              email: existing.email,
+              organizationName: existing.organizationName,
+            }),
+          }
+        : {}),
       newState: JSON.stringify({
         contactName: registry.contactName,
         email: registry.email,
         organizationName: registry.organizationName,
       }),
-      ...(adminInfo.ipAddress !== undefined ? { ipAddress: adminInfo.ipAddress } : {}),
-      ...(adminInfo.userAgent !== undefined ? { userAgent: adminInfo.userAgent } : {}),
+      ...(adminInfo.ipAddress !== undefined
+        ? { ipAddress: adminInfo.ipAddress }
+        : {}),
+      ...(adminInfo.userAgent !== undefined
+        ? { userAgent: adminInfo.userAgent }
+        : {}),
     });
 
     res.json({
@@ -303,9 +309,14 @@ export const deleteRelayerRegistry = async (req: Request, res: Response) => {
         email: existing.email,
         organizationName: existing.organizationName,
       }),
-      ...(adminInfo.ipAddress !== undefined ? { ipAddress: adminInfo.ipAddress } : {}),
-      ...(adminInfo.userAgent !== undefined ? { userAgent: adminInfo.userAgent } : {}),
-    });
+      ...(adminInfo.ipAddress !== undefined
+        ? { ipAddress: adminInfo.ipAddress }
+        : {}),
+      ...(adminInfo.userAgent !== undefined
+        ? { userAgent: adminInfo.userAgent }
+        : {}),
+    };
+    await logAuditEvent(deleteAuditPayload);
 
     await prisma.relayerRegistry.delete({
       where: { relayerId },
