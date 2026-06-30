@@ -1,5 +1,6 @@
 from __future__ import annotations
  
+import asyncio
 import os
 import sys
 import threading
@@ -10,7 +11,11 @@ import pytest
  
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
  
-from database.connection import ConnectionKeepAlive, HEARTBEAT_QUERY
+from database.connection import (
+    AsyncConnectionKeepAlive,
+    ConnectionKeepAlive,
+    HEARTBEAT_QUERY,
+)
  
  
 def _make_connection() -> MagicMock:
@@ -100,4 +105,121 @@ def test_invalid_arguments_rejected():
         ConnectionKeepAlive(_make_connection(), interval=0)
     with pytest.raises(ValueError):
         ConnectionKeepAlive(_make_connection(), interval=-5)
+ 
+ 
+# ---------------------------------------------------------------------------
+# AsyncConnectionKeepAlive
+# ---------------------------------------------------------------------------
+ 
+ 
+class _FakeAsyncConnection:
+    """Fake async connection with an awaitable ``execute`` recording calls."""
+
+    def __init__(self, on_execute=None):
+        self.calls: list[str] = []
+        self._on_execute = on_execute
+
+    async def execute(self, query: str):
+        self.calls.append(query)
+        if self._on_execute is not None:
+            self._on_execute()
+
+
+def test_async_ping_executes_heartbeat_query():
+    async def scenario():
+        conn = _FakeAsyncConnection()
+        keepalive = AsyncConnectionKeepAlive(conn, interval=30.0)
+        assert await keepalive.ping() is True
+        assert conn.calls == [HEARTBEAT_QUERY]
+
+    asyncio.run(scenario())
+
+
+def test_async_ping_returns_false_on_failure_and_does_not_raise():
+    async def scenario():
+        conn = MagicMock()
+
+        async def boom(_query):
+            raise RuntimeError("connection reset")
+
+        conn.execute = boom
+        keepalive = AsyncConnectionKeepAlive(conn, interval=30.0)
+        # A failed ping must be swallowed so the loop survives a transient drop.
+        assert await keepalive.ping() is False
+
+    asyncio.run(scenario())
+
+
+def test_async_start_launches_task_and_stop_cancels_it():
+    async def scenario():
+        conn = _FakeAsyncConnection()
+        keepalive = AsyncConnectionKeepAlive(conn, interval=30.0)
+
+        assert keepalive.is_running is False
+        keepalive.start()
+        assert keepalive.is_running is True
+
+        await keepalive.stop()
+        assert keepalive.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_async_background_loop_pings_on_interval():
+    async def scenario():
+        # Tiny interval so the loop ticks during the test; an Event detects the
+        # first ping deterministically rather than sleeping blindly.
+        pinged = asyncio.Event()
+        conn = _FakeAsyncConnection(on_execute=pinged.set)
+
+        keepalive = AsyncConnectionKeepAlive(conn, interval=0.05)
+        keepalive.start()
+        try:
+            await asyncio.wait_for(pinged.wait(), timeout=2.0)
+        finally:
+            await keepalive.stop()
+
+        assert conn.calls and conn.calls[-1] == HEARTBEAT_QUERY
+
+    asyncio.run(scenario())
+
+
+def test_async_stop_is_prompt_and_does_not_wait_full_interval():
+    async def scenario():
+        # Large interval; stop() must return quickly by cancelling the wait,
+        # not block for the whole interval.
+        conn = _FakeAsyncConnection()
+        keepalive = AsyncConnectionKeepAlive(conn, interval=60.0)
+        keepalive.start()
+
+        start = time.monotonic()
+        await keepalive.stop()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 5.0
+        assert keepalive.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_async_double_start_is_noop():
+    async def scenario():
+        conn = _FakeAsyncConnection()
+        keepalive = AsyncConnectionKeepAlive(conn, interval=60.0)
+        keepalive.start()
+        first_task = keepalive._task
+        keepalive.start()  # should be ignored, not spawn a second task
+        assert keepalive._task is first_task
+        await keepalive.stop()
+
+    asyncio.run(scenario())
+
+
+def test_async_invalid_arguments_rejected():
+    with pytest.raises(ValueError):
+        AsyncConnectionKeepAlive(None, interval=30.0)
+    with pytest.raises(ValueError):
+        AsyncConnectionKeepAlive(_FakeAsyncConnection(), interval=0)
+    with pytest.raises(ValueError):
+        AsyncConnectionKeepAlive(_FakeAsyncConnection(), interval=-5)
  
